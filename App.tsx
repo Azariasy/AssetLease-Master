@@ -7,13 +7,13 @@ import { LeaseContract, AssetInfo, TrialBalanceRow, AnalysisResult, AssetStatus 
 import Sidebar from './components/layout/Sidebar';
 import Header from './components/layout/Header';
 
-// 页面级组件
-import Dashboard from './components/Dashboard'; // 待迁移至 pages/dashboard
-import AssetMap from './components/AssetMap';   // 待迁移至 pages/asset-map
+// 页面级组件 (遵循新架构路径)
+import DashboardPage from './pages/dashboard/DashboardPage';
+import AssetMapPage from './pages/asset-map/AssetMapPage';
 import ContractPage from './pages/contract/ContractPage';
 import ReconcilePage from './pages/finance-reconcile/ReconcilePage';
-import DataImport from './components/DataImport'; // 待迁移至 pages/import-ai
-import DecisionReport from './components/DecisionReport'; // 待迁移至 pages/decision-report
+import ImportPage from './pages/import-ai/ImportPage';
+import DecisionReportPage from './pages/decision-report/DecisionReportPage';
 
 // 服务
 import { analyzeLeaseData } from './services/gemini/geminiService';
@@ -27,17 +27,16 @@ const App: React.FC = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   useEffect(() => {
-    // 模拟数据初始化
+    // 数据初始化
     setAssets(prev => prev.map(a => ({
       ...a,
       units: Array.from({ length: 15 }, (_, i) => ({
         id: `${a.id}-u${i}`,
-        code: `${101 + i + (Math.floor(i/3)*100)}`,
+        code: `${101 + i}`,
         floor: Math.floor(i / 3) + 1,
-        area: 120 + (i % 3) * 20,
+        area: 120,
         status: i % 5 === 0 ? AssetStatus.VACANT : AssetStatus.LEASED,
-        rentPerSqm: 3.8,
-        tenant: i % 5 === 0 ? undefined : '中移(成都)产业研究院'
+        rentPerSqm: 3.8
       }))
     })));
   }, []);
@@ -48,7 +47,7 @@ const App: React.FC = () => {
       const result = await analyzeLeaseData(contracts, financialData, assets);
       setAnalysis(result);
     } catch (err) {
-      alert('AI 分析报告生成失败，请稍后重试。');
+      console.error(err);
     } finally {
       setIsAnalyzing(false);
     }
@@ -71,18 +70,26 @@ const App: React.FC = () => {
         <Header title={pageTitles[activeTab]} />
 
         <div className="p-12">
-          {activeTab === 'dashboard' && <Dashboard contracts={contracts} assets={assets} financialData={financialData} />}
-          {activeTab === 'assets' && <AssetMap assets={assets} />}
-          {activeTab === 'ledger' && <ContractPage contracts={contracts} />}
-          {activeTab === 'recon' && <ReconcilePage />}
+          {activeTab === 'dashboard' && (
+            <DashboardPage contracts={contracts} assets={assets} financialData={financialData} />
+          )}
+          {activeTab === 'assets' && (
+            <AssetMapPage assets={assets} />
+          )}
+          {activeTab === 'ledger' && (
+            <ContractPage contracts={contracts} />
+          )}
+          {activeTab === 'recon' && (
+            <ReconcilePage />
+          )}
           {activeTab === 'import' && (
-            <DataImport 
-              onFinancialDataImported={data => { setFinancialData(data); setActiveTab('dashboard'); }} 
-              onContractsImported={newContracts => { setContracts([...newContracts, ...contracts]); setActiveTab('ledger'); }} 
+            <ImportPage 
+              onFinancialDataImported={setFinancialData} 
+              onContractsImported={newOnes => setContracts([...newOnes, ...contracts])} 
             />
           )}
           {activeTab === 'analysis' && (
-            <DecisionReport 
+            <DecisionReportPage 
               analysis={analysis} 
               isAnalyzing={isAnalyzing} 
               onStartAnalysis={handleStartAnalysis} 

@@ -21,6 +21,7 @@ export interface LeaseContract {
   status: '履行中' | '即将到期' | '已超期';
   cumulativeArrears: number;
   overdueDays: number;
+  deposit?: number; // 押金
 }
 
 export interface TrialBalanceRow {
@@ -44,8 +45,6 @@ export interface AssetUnit {
   rentPerSqm: number;
   tenant?: string;
   contractId?: string;
-  propertyMargin?: number;
-  isRelatedParty?: boolean;
 }
 
 export interface AssetInfo {
@@ -62,5 +61,5 @@ export interface AnalysisResult {
   summary: string;
   risks: string[];
   recommendations: string[];
-  kpiIndicators?: { label: string; value: string; status: string }[];
+  kpiIndicators?: { label: string; value: string; status: 'success' | 'warning' | 'error' }[];
 }

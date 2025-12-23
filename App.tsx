@@ -1,13 +1,13 @@
-
 import React, { useState, useEffect } from 'react';
-import { MOCK_CONTRACTS, MOCK_ASSETS } from './constants';
-import { LeaseContract, AssetInfo, TrialBalanceRow, AnalysisResult, AssetStatus } from './types';
+// Correct the import paths to point to folder-based index files which contain the necessary MOCK_FINANCIAL_DATA and augmented types.
+import { MOCK_CONTRACTS, MOCK_ASSETS, MOCK_FINANCIAL_DATA } from './constants/index';
+import { LeaseContract, AssetInfo, TrialBalanceRow, AnalysisResult, AssetStatus } from './types/index';
 
 // 布局组件
 import Sidebar from './components/layout/Sidebar';
 import Header from './components/layout/Header';
 
-// 页面级组件 (遵循新架构路径)
+// 页面级组件
 import DashboardPage from './pages/dashboard/DashboardPage';
 import AssetMapPage from './pages/asset-map/AssetMapPage';
 import ContractPage from './pages/contract/ContractPage';
@@ -22,12 +22,12 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'assets' | 'ledger' | 'recon' | 'import' | 'analysis'>('dashboard');
   const [contracts, setContracts] = useState<LeaseContract[]>(MOCK_CONTRACTS);
   const [assets, setAssets] = useState<AssetInfo[]>(MOCK_ASSETS);
-  const [financialData, setFinancialData] = useState<TrialBalanceRow[]>([]);
+  const [financialData, setFinancialData] = useState<TrialBalanceRow[]>(MOCK_FINANCIAL_DATA);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   useEffect(() => {
-    // 数据初始化
+    // 增强资产单元数据
     setAssets(prev => prev.map(a => ({
       ...a,
       units: Array.from({ length: 15 }, (_, i) => ({
@@ -47,29 +47,29 @@ const App: React.FC = () => {
       const result = await analyzeLeaseData(contracts, financialData, assets);
       setAnalysis(result);
     } catch (err) {
-      console.error(err);
+      console.error("AI 分析失败:", err);
     } finally {
       setIsAnalyzing(false);
     }
   };
 
   const pageTitles: Record<string, string> = {
-    dashboard: '经营看板',
-    assets: '资产地图',
-    ledger: '合同台账',
-    recon: '财务对账',
-    import: '数据中心',
-    analysis: '决策报告'
+    dashboard: '企业经营驾驶舱',
+    assets: '全景资产地图',
+    ledger: '租赁合同台账',
+    recon: '财务智能对账',
+    import: '数据中心 (AI)',
+    analysis: 'CFO 决策报告'
   };
 
   return (
     <div className="min-h-screen flex bg-slate-50">
       <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
 
-      <main className="ml-80 flex-1 min-h-screen">
+      <main className="ml-80 flex-1 min-h-screen flex flex-col">
         <Header title={pageTitles[activeTab]} />
 
-        <div className="p-12">
+        <div className="p-12 flex-1">
           {activeTab === 'dashboard' && (
             <DashboardPage contracts={contracts} assets={assets} financialData={financialData} />
           )}

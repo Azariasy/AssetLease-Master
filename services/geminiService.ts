@@ -1,8 +1,6 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
 const PROMPT_TEMPLATES = {
   CONTRACT_EXTRACTION: `
     作为资深法务与租赁专家，请从合同中提取核心要素。
@@ -41,6 +39,8 @@ const withRetry = async <T>(fn: () => Promise<T>, retries = 3, delay = 1000): Pr
 };
 
 export const analyzeLeaseData = async (contracts: any, ledger: any, assets: any) => {
+  // Create a new GoogleGenAI instance right before making an API call to ensure it always uses the most up-to-date API key.
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const prompt = `
     ${PROMPT_TEMPLATES.MANAGEMENT_REPORT}
     基础数据：
@@ -83,6 +83,8 @@ export const analyzeLeaseData = async (contracts: any, ledger: any, assets: any)
 };
 
 export const extractContractFromDoc = async (base64Data: string, mimeType: string) => {
+  // Create a new GoogleGenAI instance right before making an API call to ensure it always uses the most up-to-date API key.
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   return withRetry(async () => {
     const response = await ai.models.generateContent({
       model: "gemini-3-pro-preview",

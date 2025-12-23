@@ -3,30 +3,18 @@ import { GoogleGenAI, Type } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-const PROMPT_TEMPLATES = {
-  CONTRACT_EXTRACTION: `
-    作为资深法务与租赁专家，请从合同中提取核心要素。
-    特别注意：
-    - 识别关联方关系（中移、移动等关键词）。
-    - 区分房屋租金与物业费。
-    - 提取准确的免租期或递增条款（若有）。
-  `,
-  FINANCIAL_AUDIT: `
-    作为高级审计师，请对比合同约定与财务明细。
-    分析重点：
-    - 租金收缴率。
-    - 跨期入账原因推测（如：季度预收、补交欠费）。
-    - 科目归集准确性（1131/2401/5171）。
-  `,
-  MANAGEMENT_REPORT: `
-    作为首席财务官(CFO)，请生成管理决策建议。
-    要求：
-    - 语言专业、精炼。
-    - 识别出具体的财务风险（如：对关联方过度依赖、物业费亏损）。
-    - 提供可落地的改进措施。
-  `
+/**
+ * 业务 Prompt 模版库
+ */
+export const PROMPT_TEMPLATES = {
+  CONTRACT_EXTRACTION: `作为资深租赁专家，请从合同中提取：合同号、承租方、资产名、起止日期、年度租金、物业费、支付周期、单位类型（关联/外部）。`,
+  FINANCIAL_AUDIT: `作为高级审计师，请对比合同约定与财务流水，识别收缴率差异及原因（如预收、欠费）。`,
+  DECISION_REPORT: `作为 CFO，请根据合同、财务、资产三方数据，生成经营摘要、风险预警和管理建议。`
 };
 
+/**
+ * 通用重试封装
+ */
 const withRetry = async <T>(fn: () => Promise<T>, retries = 3, delay = 1000): Promise<T> => {
   try {
     return await fn();
@@ -40,16 +28,11 @@ const withRetry = async <T>(fn: () => Promise<T>, retries = 3, delay = 1000): Pr
   }
 };
 
+/**
+ * 核心分析服务
+ */
 export const analyzeLeaseData = async (contracts: any, ledger: any, assets: any) => {
-  const prompt = `
-    ${PROMPT_TEMPLATES.MANAGEMENT_REPORT}
-    基础数据：
-    合同: ${JSON.stringify(contracts)}
-    流水: ${JSON.stringify(ledger)}
-    资产: ${JSON.stringify(assets)}
-    请严格返回 JSON。
-  `;
-
+  const prompt = `${PROMPT_TEMPLATES.DECISION_REPORT}\n数据：${JSON.stringify({ contracts, ledger, assets })}`;
   return withRetry(async () => {
     const response = await ai.models.generateContent({
       model: "gemini-3-pro-preview",
@@ -66,11 +49,7 @@ export const analyzeLeaseData = async (contracts: any, ledger: any, assets: any)
               type: Type.ARRAY, 
               items: { 
                 type: Type.OBJECT, 
-                properties: { 
-                  label: { type: Type.STRING }, 
-                  value: { type: Type.STRING }, 
-                  status: { type: Type.STRING, description: "success, warning, error" } 
-                } 
+                properties: { label: { type: Type.STRING }, value: { type: Type.STRING }, status: { type: Type.STRING } } 
               } 
             }
           },
@@ -82,6 +61,9 @@ export const analyzeLeaseData = async (contracts: any, ledger: any, assets: any)
   });
 };
 
+/**
+ * 文档提取服务
+ */
 export const extractContractFromDoc = async (base64Data: string, mimeType: string) => {
   return withRetry(async () => {
     const response = await ai.models.generateContent({
@@ -103,8 +85,7 @@ export const extractContractFromDoc = async (base64Data: string, mimeType: strin
             monthlyPropertyFee: { type: Type.NUMBER },
             paymentCycle: { type: Type.STRING },
             type: { type: Type.STRING }
-          },
-          required: ["contractNo", "tenantName", "annualRent"]
+          }
         }
       }
     });

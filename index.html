@@ -11,6 +11,10 @@
         body { font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif; }
         .drop-zone { transition: all 0.3s ease; }
         .drop-zone:hover { border-color: #3b82f6; background-color: #eff6ff; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #cbd5e1; }
     </style>
 <script type="importmap">
 {
@@ -21,12 +25,13 @@
     "recharts": "https://esm.sh/recharts@^3.6.0",
     "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
     "xlsx": "https://esm.sh/xlsx@0.18.5",
-    "jszip": "https://esm.sh/jszip@3.10.1"
+    "jszip": "https://esm.sh/jszip@3.10.1",
+    "lucide-react": "https://esm.sh/lucide-react@0.475.0"
   }
 }
 </script>
 </head>
-<body class="bg-gray-50">
+<body class="bg-slate-50 text-slate-900 antialiased">
     <div id="root"></div>
 </body>
 </html>

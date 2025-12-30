@@ -1,5 +1,5 @@
 {
-  "name": "AssetLease Master - 租赁资产智能管家",
-  "description": "专为企业非上市主体设计的租赁台账管理系统，集成合同、财务明细与资产状态，利用AI技术辅助数据对账与领导汇报。",
+  "name": "AssetLease Pro ",
+  "description": "财务科目余额、明细站分析展示工具",
   "requestFramePermissions": []
 }

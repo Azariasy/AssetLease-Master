@@ -1,56 +1,38 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
+import { AnalysisResult } from '../types';
 
-const PROMPT_TEMPLATES = {
-  CONTRACT_EXTRACTION: `
-    作为资深法务与租赁专家，请从合同中提取核心要素。
-    特别注意：
-    - 识别关联方关系（中移、移动等关键词）。
-    - 区分房屋租金与物业费。
-    - 提取准确的免租期或递增条款（若有）。
-  `,
-  FINANCIAL_AUDIT: `
-    作为高级审计师，请对比合同约定与财务明细。
-    分析重点：
-    - 租金收缴率。
-    - 跨期入账原因推测（如：季度预收、补交欠费）。
-    - 科目归集准确性（1131/2401/5171）。
-  `,
-  MANAGEMENT_REPORT: `
-    作为首席财务官(CFO)，请生成管理决策建议。
-    要求：
-    - 语言专业、精炼。
-    - 识别出具体的财务风险（如：对关联方过度依赖、物业费亏损）。
-    - 提供可落地的改进措施。
-  `
-};
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-const withRetry = async <T>(fn: () => Promise<T>, retries = 3, delay = 1000): Promise<T> => {
-  try {
-    return await fn();
-  } catch (error: any) {
-    const isRetryable = error?.status === 500 || error?.status === 503 || error?.status === 429;
-    if (retries > 0 && isRetryable) {
-      await new Promise(resolve => setTimeout(resolve, delay));
-      return withRetry(fn, retries - 1, delay * 2);
-    }
-    throw error;
-  }
-};
-
-export const analyzeLeaseData = async (contracts: any, ledger: any, assets: any) => {
-  // Create a new GoogleGenAI instance right before making an API call to ensure it always uses the most up-to-date API key.
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// AI 智能对账分析
+export const analyzeReconciliation = async (
+  plans: any[], 
+  ledger: any[], 
+  mismatches: any[]
+): Promise<AnalysisResult> => {
   const prompt = `
-    ${PROMPT_TEMPLATES.MANAGEMENT_REPORT}
-    基础数据：
-    合同: ${JSON.stringify(contracts)}
-    流水: ${JSON.stringify(ledger)}
-    资产: ${JSON.stringify(assets)}
-    请严格返回 JSON。
+    作为财务审计专家，请分析以下非上市主体租赁业务的对账数据：
+    
+    1. 总体应收计划: ${JSON.stringify(plans.length)} 笔
+    2. 未匹配记录: ${JSON.stringify(mismatches.slice(0, 10))} (仅展示前10条)
+    3. ERP财务流水片段: ${JSON.stringify(ledger.slice(0, 5))}
+
+    请诊断匹配失败的主要原因（如：跨期确认、金额税差、摘要模糊），并给出具体的整改或人工核对建议。
+    特别关注关联方交易的合规性。
+
+    请返回JSON格式：
+    {
+      "summary": "简要的分析结论（200字以内）",
+      "risks": ["风险点1", "风险点2"],
+      "recommendations": ["建议1", "建议2"],
+      "kpiIndicators": [
+        {"label": "对账匹配率", "value": "63.1%", "status": "warning"},
+        {"label": "关联方异常", "value": "0笔", "status": "success"}
+      ]
+    }
   `;
 
-  return withRetry(async () => {
+  try {
     const response = await ai.models.generateContent({
       model: "gemini-3-pro-preview",
       contents: prompt,
@@ -69,47 +51,54 @@ export const analyzeLeaseData = async (contracts: any, ledger: any, assets: any)
                 properties: { 
                   label: { type: Type.STRING }, 
                   value: { type: Type.STRING }, 
-                  status: { type: Type.STRING, description: "success, warning, error" } 
+                  status: { type: Type.STRING } 
                 } 
               } 
             }
           },
-          required: ["summary", "risks", "recommendations", "kpiIndicators"]
+          required: ["summary", "risks", "recommendations"]
         }
       }
     });
+
     return JSON.parse(response.text || '{}');
-  });
+  } catch (error) {
+    console.error("AI Analysis Failed:", error);
+    // 返回兜底数据
+    return {
+      summary: "AI 服务暂时不可用，请检查网络连接或 API Key。",
+      risks: ["无法进行智能风险扫描"],
+      recommendations: ["请人工核对未匹配项目"],
+      kpiIndicators: []
+    };
+  }
 };
 
-export const extractContractFromDoc = async (base64Data: string, mimeType: string) => {
-  // Create a new GoogleGenAI instance right before making an API call to ensure it always uses the most up-to-date API key.
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  return withRetry(async () => {
-    const response = await ai.models.generateContent({
-      model: "gemini-3-pro-preview",
-      contents: {
-        parts: [{ inlineData: { data: base64Data, mimeType } }, { text: PROMPT_TEMPLATES.CONTRACT_EXTRACTION }]
-      },
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            contractNo: { type: Type.STRING },
-            tenantName: { type: Type.STRING },
-            assetName: { type: Type.STRING },
-            startDate: { type: Type.STRING },
-            endDate: { type: Type.STRING },
-            annualRent: { type: Type.NUMBER },
-            monthlyPropertyFee: { type: Type.NUMBER },
-            paymentCycle: { type: Type.STRING },
-            type: { type: Type.STRING }
-          },
-          required: ["contractNo", "tenantName", "annualRent"]
-        }
-      }
-    });
-    return JSON.parse(response.text || '{}');
+// AI 合同提取 (模拟 v2.0 需求)
+export const extractContractData = async (base64Content: string, mimeType: string) => {
+  const prompt = `
+    请解析这份租赁合同，提取以下关键字段用于财务台账系统：
+    - 合同编号 (contractNo)
+    - 承租方名称 (tenantName)
+    - 业务类型 (type): '房屋租赁' 或 '物业服务'
+    - 租金/费用金额 (amount): 提取明确的数字
+    - 支付周期 (paymentCycle): 月度/季度/年度
+    - 租赁起止日期 (startDate, endDate)
+    - 是否关联方 (isRelated): 根据承租方名称判断 (如含'移动')
+
+    返回 JSON 格式。
+  `;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-3-pro-preview",
+    contents: {
+      parts: [
+        { inlineData: { data: base64Content, mimeType } },
+        { text: prompt }
+      ]
+    },
+    config: { responseMimeType: "application/json" }
   });
+  
+  return JSON.parse(response.text || '{}');
 };

@@ -158,7 +158,7 @@ const extractCodesFromAccountString = (fullAccount: string): { deptCode: string,
 // ==========================================
 // Core: Generic Data Matrix Processor
 // ==========================================
-const processDataMatrix = (data: any[][]): LedgerRow[] => {
+const processDataMatrix = (data: any[][], expectedPrefix?: string): LedgerRow[] => {
   let headerIndex = -1;
   const targetKeywords = ['凭证', '期间', '日期', '科目', '摘要', '借方', '贷方', '账户', '说明', '借项'];
   
@@ -280,12 +280,24 @@ const processDataMatrix = (data: any[][]): LedgerRow[] => {
     const formattedDate = idxDate > -1 ? formatExcelDate(cells[idxDate]) : '';
     const formattedPeriod = idxPeriod > -1 ? formatPeriod(cells[idxPeriod]) : '';
 
-    // Department Logic
+    // Department Logic & Entity Validation
     let departmentCode = '';
     let departmentName = '';
     
     if (idxDeptCode > -1) {
         const rawDept = String(cells[idxDeptCode] || '').replace(/[\.\s]/g, '');
+        
+        // --- VALIDATION CHECK ---
+        // If we expect a specific prefix (e.g. 391310 for Listed), but find another known prefix (012610 for Non-listed)
+        // rawDept typically contains CompanySegment + DeptSegment (e.g. 391310260003)
+        if (expectedPrefix && rawDept.length >= 6) {
+            const detected = KNOWN_PREFIXES.find(p => rawDept.startsWith(p));
+            if (detected && detected !== expectedPrefix) {
+                throw new Error(`ENTITY_MISMATCH:${detected}`);
+            }
+        }
+        // ------------------------
+
         if (rawDept.length >= 12 && KNOWN_PREFIXES.some(p => rawDept.startsWith(p))) {
              departmentCode = rawDept.substring(6, 12);
         } else {
@@ -344,7 +356,7 @@ const processDataMatrix = (data: any[][]): LedgerRow[] => {
 // ==========================================
 // NEW: Balance Sheet Processor
 // ==========================================
-const processBalanceMatrix = (data: any[][]): BalanceRow[] => {
+const processBalanceMatrix = (data: any[][], expectedPrefix?: string): BalanceRow[] => {
     let headerIndex = -1;
     const targetKeywords = ['科目', '期初', '期末', '余额', '借方', '贷方', '本期', '名称'];
     
@@ -381,7 +393,7 @@ const processBalanceMatrix = (data: any[][]): BalanceRow[] => {
     
     // Cost Center
     let idxCostCenter = headers.findIndex(h => h === '成本中心说明' || h === '成本中心段说明');
-    if (idxCostCenter === -1) idxCostCenter = headers.findIndex(h => h.includes('成本中心') || (h.includes('部门') && !h.includes('编')));
+    if (idxCostCenter === -1) idxCostCenter = headers.findIndex(h => h.includes('成本中心') || (h.includes('部门') && !h.includes('段') && !h.includes('编')));
     
     let idxCostCenterCode = headers.findIndex(h => h === '成本中心段编码' || h === '部门段');
     if (idxCostCenterCode === -1) idxCostCenterCode = headers.findIndex(h => (h.includes('成本中心') || h.includes('部门')) && (h.includes('编') || h.includes('Code')));
@@ -433,6 +445,16 @@ const processBalanceMatrix = (data: any[][]): BalanceRow[] => {
 
         if (idxCostCenterCode > -1) {
             const rawDept = String(cells[idxCostCenterCode] || '').replace(/[\.\s]/g, '');
+            
+            // --- VALIDATION CHECK ---
+            if (expectedPrefix && rawDept.length >= 6) {
+                const detected = KNOWN_PREFIXES.find(p => rawDept.startsWith(p));
+                if (detected && detected !== expectedPrefix) {
+                    throw new Error(`ENTITY_MISMATCH:${detected}`);
+                }
+            }
+            // ------------------------
+
             if (rawDept.length >= 12 && KNOWN_PREFIXES.some(p => rawDept.startsWith(p))) {
                  deptCode = rawDept.substring(6, 12);
             } else {
@@ -521,16 +543,16 @@ const parseCSVLine = (line: string): string[] => {
   return result;
 };
 
-export const parseCSVData = (fileContent: string): LedgerRow[] => {
+export const parseCSVData = (fileContent: string, expectedPrefix?: string): LedgerRow[] => {
   const lines = fileContent.split(/\r?\n/).filter(line => line.trim() !== '');
   const matrix = lines.map(line => parseCSVLine(line));
-  return processDataMatrix(matrix);
+  return processDataMatrix(matrix, expectedPrefix);
 };
 
-export const parseBalanceCSV = (fileContent: string): BalanceRow[] => {
+export const parseBalanceCSV = (fileContent: string, expectedPrefix?: string): BalanceRow[] => {
     const lines = fileContent.split(/\r?\n/).filter(line => line.trim() !== '');
     const matrix = lines.map(line => parseCSVLine(line));
-    return processBalanceMatrix(matrix);
+    return processBalanceMatrix(matrix, expectedPrefix);
 };
 
 // ============================================================================
@@ -563,7 +585,7 @@ const createWorker = () => {
   return new Worker(URL.createObjectURL(blob));
 };
 
-export const parseExcelData = async (file: File): Promise<LedgerRow[]> => {
+export const parseExcelData = async (file: File, expectedPrefix?: string): Promise<LedgerRow[]> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     
@@ -577,9 +599,13 @@ export const parseExcelData = async (file: File): Promise<LedgerRow[]> => {
           worker.onmessage = (event) => {
               const { success, matrix, error } = event.data;
               if (success) {
-                  // Process the matrix on main thread (fast operation)
-                  const result = processDataMatrix(matrix);
-                  resolve(result);
+                  try {
+                      // Process the matrix on main thread (fast operation)
+                      const result = processDataMatrix(matrix, expectedPrefix);
+                      resolve(result);
+                  } catch (processErr) {
+                      reject(processErr);
+                  }
               } else {
                   console.warn("Worker Parsing Failed, falling back to main thread", error);
                   // Fallback to main thread
@@ -588,7 +614,7 @@ export const parseExcelData = async (file: File): Promise<LedgerRow[]> => {
                       const sheetName = workbook.SheetNames[0];
                       const sheet = workbook.Sheets[sheetName];
                       const mat = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][];
-                      resolve(processDataMatrix(mat));
+                      resolve(processDataMatrix(mat, expectedPrefix));
                   } catch (fallbackErr) {
                       reject(fallbackErr);
                   }
@@ -605,7 +631,7 @@ export const parseExcelData = async (file: File): Promise<LedgerRow[]> => {
                   const sheetName = workbook.SheetNames[0];
                   const sheet = workbook.Sheets[sheetName];
                   const mat = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][];
-                  resolve(processDataMatrix(mat));
+                  resolve(processDataMatrix(mat, expectedPrefix));
               } catch (fallbackErr) {
                   reject(fallbackErr);
               }
@@ -625,7 +651,7 @@ export const parseExcelData = async (file: File): Promise<LedgerRow[]> => {
   });
 };
 
-export const parseExcelBalance = async (file: File): Promise<BalanceRow[]> => {
+export const parseExcelBalance = async (file: File, expectedPrefix?: string): Promise<BalanceRow[]> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = (e) => {
@@ -637,8 +663,12 @@ export const parseExcelBalance = async (file: File): Promise<BalanceRow[]> => {
             worker.onmessage = (event) => {
                 const { success, matrix, error } = event.data;
                 if (success) {
-                    const result = processBalanceMatrix(matrix);
-                    resolve(result);
+                    try {
+                        const result = processBalanceMatrix(matrix, expectedPrefix);
+                        resolve(result);
+                    } catch (processErr) {
+                        reject(processErr);
+                    }
                 } else {
                     reject(new Error(error));
                 }
@@ -652,7 +682,7 @@ export const parseExcelBalance = async (file: File): Promise<BalanceRow[]> => {
                 const sheetName = workbook.SheetNames[0];
                 const sheet = workbook.Sheets[sheetName];
                 const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][];
-                const result = processBalanceMatrix(matrix);
+                const result = processBalanceMatrix(matrix, expectedPrefix);
                 resolve(result);
              } catch (e) { reject(e); }
         }

@@ -1,14 +1,17 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { BalanceRow, SystemConfig, Company } from '../types';
-import { Search, Filter, ArrowRightCircle, Users, Building2, X, ChevronRight, ChevronDown, LayoutGrid, Download, FolderTree, List, PlusSquare, MinusSquare, Briefcase, Layers, ChevronLeft, ChevronsLeft, ChevronsRight } from 'lucide-react';
+import { Search, Filter, ArrowRightCircle, X, ChevronRight, ChevronDown, Download, List, PlusSquare, MinusSquare, Layers, ChevronLeft, ChevronsLeft, ChevronsRight } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import { formatCurrency } from '../utils/currency';
+import { useDebounce } from '../hooks/useDebounce';
 
 interface BalancePageProps {
   balances: BalanceRow[];
   onDrillDown: (subjectCode: string, period: string) => void;
   config?: SystemConfig;
   currentEntity?: Company;
+  privacyMode: boolean;
 }
 
 // Extended Interface for Tree Display
@@ -22,7 +25,7 @@ interface TreeBalanceRow extends BalanceRow {
 
 const ITEMS_PER_PAGE = 50;
 
-const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config, currentEntity }) => {
+const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config, currentEntity, privacyMode }) => {
   const storagePrefix = currentEntity ? `bal_${currentEntity.id}_` : 'bal_';
 
   // --- State ---
@@ -31,7 +34,10 @@ const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config
   const [activeTab, setActiveTab] = useState<string>(() => sessionStorage.getItem(storagePrefix + 'tab') || '全部');
   const [viewMode, setViewMode] = useState<'tree' | 'list'>(() => (sessionStorage.getItem(storagePrefix + 'viewMode') as 'tree'|'list') || 'tree');
   
-  // Dimensions - Allow toggling in both modes now
+  // Debounced Search Keyword
+  const debouncedKeyword = useDebounce(keyword, 300);
+
+  // Dimensions - Allow toggling
   const [showDept, setShowDept] = useState(() => sessionStorage.getItem(storagePrefix + 'showDept') !== 'false');
   const [showCounterparty, setShowCounterparty] = useState(() => sessionStorage.getItem(storagePrefix + 'showCP') !== 'false');
   const [showProject, setShowProject] = useState(() => sessionStorage.getItem(storagePrefix + 'showProj') !== 'false');
@@ -54,7 +60,7 @@ const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config
   useEffect(() => { sessionStorage.setItem(storagePrefix + 'viewMode', viewMode); }, [viewMode, storagePrefix]);
 
   // Reset page when filters change
-  useEffect(() => { setCurrentPage(1); }, [period, keyword, activeTab, viewMode]);
+  useEffect(() => { setCurrentPage(1); }, [period, debouncedKeyword, activeTab, viewMode]);
 
   // --- Init ---
   const periods = useMemo(() => Array.from(new Set(balances.map(b => b.period))).sort().reverse(), [balances]);
@@ -69,6 +75,8 @@ const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config
 
   // --- Helpers ---
   const normalize = (str: string) => str ? String(str).replace(/[\s\.]/g, '').toLowerCase() : '';
+  
+  // Subject Tree Logic
   const inferNameByLevel = (targetCode: string, childName: string): string => {
       if (!childName) return `(汇总) ${targetCode}`;
       const targetLevel = Math.max(0, Math.ceil((targetCode.length - 4) / 2));
@@ -105,6 +113,7 @@ const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config
         const aggMap = new Map<string, BalanceRow>();
         filtered.forEach(row => {
             let key = row.subjectCode;
+            // Key differentiation based on selected dimensions
             if (showDept) key += `|${row.costCenterCode || 'NULL'}`;
             if (showCounterparty) key += `|${row.counterpartyCode || 'NULL'}`;
             if (showProject) key += `|${row.projectCode || 'NULL'}`;
@@ -128,131 +137,130 @@ const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config
         });
 
         let result = Array.from(aggMap.values());
-        if (keyword) {
-            const terms = keyword.toLowerCase().split(' ').filter(t => t);
+        if (debouncedKeyword) {
+            const terms = debouncedKeyword.toLowerCase().split(' ').filter(t => t);
             result = result.filter(b => {
                 const text = normalize(`${b.subjectCode} ${b.subjectName} ${b.costCenterName} ${b.counterpartyName} ${b.projectName} ${b.subAccountName}`);
                 const amountStr = Math.abs(b.closingBalance).toString();
-                return terms.every(term => text.includes(term)) || (amountStr.includes(keyword));
+                return terms.every(term => text.includes(term)) || (amountStr.includes(debouncedKeyword));
             });
         }
         return result.sort((a,b) => a.subjectCode.localeCompare(b.subjectCode)).map(r => ({ ...r, level: 0, hasChildren: false, isGenerated: false, parentCode: null } as TreeBalanceRow));
-    } 
-    
-    // --- Tree Mode (Hierarchy) ---
-    const nodeMap = new Map<string, TreeBalanceRow>();
-    
-    // Map existing rows (Leaf Nodes or Intermediate Nodes present in source)
-    filtered.forEach(row => {
-        if (!nodeMap.has(row.subjectCode)) {
-            nodeMap.set(row.subjectCode, { 
-                ...row, 
-                level: 0, hasChildren: false, parentCode: null,
-                // KEEP dimensions for tree nodes, do not clear them!
-                openingBalance: 0, debitPeriod: 0, creditPeriod: 0, closingBalance: 0, lastYearClosingBalance: 0,
-                isGenerated: false
-            });
-        }
-        const node = nodeMap.get(row.subjectCode)!;
-        node.openingBalance += row.openingBalance;
-        node.debitPeriod += row.debitPeriod;
-        node.creditPeriod += row.creditPeriod;
-        node.closingBalance += row.closingBalance;
-        node.lastYearClosingBalance = (node.lastYearClosingBalance || 0) + (row.lastYearClosingBalance || 0);
-    });
-
-    // Synthesize Parents
-    const existingCodes = Array.from(nodeMap.keys());
-    const getParentCode = (code: string) => (code.length <= 4) ? null : code.substring(0, code.length - 2);
-
-    existingCodes.forEach(leafCode => {
-        let curr = leafCode;
-        const leafName = nodeMap.get(leafCode)?.subjectName || '';
-        while (true) {
-            const pCode = getParentCode(curr);
-            if (!pCode) break;
-            const inferredName = inferNameByLevel(pCode, leafName);
-
-            if (!nodeMap.has(pCode)) {
-                nodeMap.set(pCode, {
-                    id: `gen-${pCode}`,
-                    period: period,
-                    subjectCode: pCode,
-                    subjectName: inferredName,
-                    accountElement: nodeMap.get(curr)?.accountElement,
-                    // Generated Parents have empty dimensions
-                    costCenter: '', counterparty: '', projectCode: '', subAccountCode: '',
+    } else {
+        // --- Tree Mode (Standard Subject Hierarchy) ---
+        const nodeMap = new Map<string, TreeBalanceRow>();
+        
+        filtered.forEach(row => {
+            // In tree mode, we aggregate by subject code first
+            // Note: If dimensions are shown, they might be ambiguous at the subject level if not drilled down. 
+            // Standard behavior: Show aggregated amount for the subject.
+            if (!nodeMap.has(row.subjectCode)) {
+                nodeMap.set(row.subjectCode, { 
+                    ...row, 
+                    level: 0, hasChildren: false, parentCode: null,
                     openingBalance: 0, debitPeriod: 0, creditPeriod: 0, closingBalance: 0, lastYearClosingBalance: 0,
-                    level: 0, hasChildren: true, isGenerated: true, parentCode: getParentCode(pCode),
+                    isGenerated: false,
+                    // Clear dimensions for aggregated node to avoid confusion, 
+                    // or keep the last one (but dual line renderer handles empty/mixed gracefully)
                 });
-            } else {
+            }
+            const node = nodeMap.get(row.subjectCode)!;
+            node.openingBalance += row.openingBalance;
+            node.debitPeriod += row.debitPeriod;
+            node.creditPeriod += row.creditPeriod;
+            node.closingBalance += row.closingBalance;
+            node.lastYearClosingBalance = (node.lastYearClosingBalance || 0) + (row.lastYearClosingBalance || 0);
+        });
+
+        // Synthesize Parents
+        const existingCodes = Array.from(nodeMap.keys());
+        const getParentCode = (code: string) => (code.length <= 4) ? null : code.substring(0, code.length - 2);
+
+        existingCodes.forEach(leafCode => {
+            let curr = leafCode;
+            const leafName = nodeMap.get(leafCode)?.subjectName || '';
+            while (true) {
+                const pCode = getParentCode(curr);
+                if (!pCode) break;
+                const inferredName = inferNameByLevel(pCode, leafName);
+
+                if (!nodeMap.has(pCode)) {
+                    nodeMap.set(pCode, {
+                        id: `gen-${pCode}`,
+                        period: period,
+                        subjectCode: pCode,
+                        subjectName: inferredName,
+                        accountElement: nodeMap.get(curr)?.accountElement,
+                        // Generated Parents have empty dimensions
+                        costCenter: '', counterparty: '', projectCode: '', subAccountCode: '',
+                        openingBalance: 0, debitPeriod: 0, creditPeriod: 0, closingBalance: 0, lastYearClosingBalance: 0,
+                        level: 0, hasChildren: true, isGenerated: true, parentCode: getParentCode(pCode),
+                    });
+                } else {
+                    const parent = nodeMap.get(pCode)!;
+                    if (parent.isGenerated && inferredName && (!parent.subjectName || parent.subjectName.includes('汇总'))) {
+                        parent.subjectName = inferredName;
+                    }
+                }
+                curr = pCode;
+            }
+        });
+
+        // Aggregate Bottom-Up
+        const sortedAllCodes = Array.from(nodeMap.keys()).sort((a, b) => b.length - a.length);
+        sortedAllCodes.forEach(code => {
+            const node = nodeMap.get(code)!;
+            const pCode = getParentCode(code);
+            if (pCode && nodeMap.has(pCode)) {
                 const parent = nodeMap.get(pCode)!;
-                if (parent.isGenerated && inferredName && (!parent.subjectName || parent.subjectName.includes('汇总'))) {
-                     parent.subjectName = inferredName;
+                parent.hasChildren = true;
+                if (parent.isGenerated) {
+                    parent.openingBalance += node.openingBalance;
+                    parent.debitPeriod += node.debitPeriod;
+                    parent.creditPeriod += node.creditPeriod;
+                    parent.closingBalance += node.closingBalance;
+                    parent.lastYearClosingBalance = (parent.lastYearClosingBalance || 0) + (node.lastYearClosingBalance || 0);
                 }
             }
-            curr = pCode;
-        }
-    });
+        });
 
-    // Aggregate Bottom-Up
-    const sortedAllCodes = Array.from(nodeMap.keys()).sort((a, b) => b.length - a.length);
-    sortedAllCodes.forEach(code => {
-        const node = nodeMap.get(code)!;
-        const pCode = getParentCode(code);
-        if (pCode && nodeMap.has(pCode)) {
-            const parent = nodeMap.get(pCode)!;
-            parent.hasChildren = true;
-            if (parent.isGenerated) {
-                parent.openingBalance += node.openingBalance;
-                parent.debitPeriod += node.debitPeriod;
-                parent.creditPeriod += node.creditPeriod;
-                parent.closingBalance += node.closingBalance;
-                parent.lastYearClosingBalance = (parent.lastYearClosingBalance || 0) + (node.lastYearClosingBalance || 0);
+        // Flatten for View
+        const result: TreeBalanceRow[] = [];
+        const finalSortedCodes = Array.from(nodeMap.keys()).sort();
+        const visibleCodes = new Set<string>();
+
+        finalSortedCodes.forEach(code => {
+            const node = nodeMap.get(code)!;
+            node.level = Math.max(0, (code.length - 4) / 2);
+            
+            if (debouncedKeyword) {
+                const terms = debouncedKeyword.toLowerCase().split(' ').filter(t => t);
+                const text = normalize(`${node.subjectCode} ${node.subjectName}`);
+                const amountStr = Math.abs(node.closingBalance).toString();
+                const match = terms.every(term => text.includes(term)) || amountStr.includes(debouncedKeyword);
+                if (match) result.push(node);
+            } else {
+                const pCode = getParentCode(code);
+                const isRoot = !pCode || !nodeMap.has(pCode);
+                
+                let isVisible = false;
+                if (isRoot) {
+                    isVisible = true;
+                } else {
+                    if (visibleCodes.has(pCode!) && expandedRows.has(pCode!)) {
+                        isVisible = true;
+                    }
+                }
+
+                if (isVisible) {
+                    visibleCodes.add(code);
+                    result.push(node);
+                }
             }
-        }
-    });
-
-    // Flatten for View with Filtering and Recursive Visibility Check
-    const result: TreeBalanceRow[] = [];
-    const finalSortedCodes = Array.from(nodeMap.keys()).sort();
-    
-    // TRACK VISIBILITY: A node is visible only if its parent is visible AND expanded
-    const visibleCodes = new Set<string>();
-
-    finalSortedCodes.forEach(code => {
-        const node = nodeMap.get(code)!;
-        node.level = Math.max(0, (code.length - 4) / 2);
-        
-        if (keyword) {
-             const terms = keyword.toLowerCase().split(' ').filter(t => t);
-             const text = normalize(`${node.subjectCode} ${node.subjectName}`);
-             const amountStr = Math.abs(node.closingBalance).toString();
-             const match = terms.every(term => text.includes(term)) || amountStr.includes(keyword);
-             if (match) result.push(node);
-        } else {
-             const pCode = getParentCode(code);
-             const isRoot = !pCode || !nodeMap.has(pCode);
-             
-             let isVisible = false;
-             if (isRoot) {
-                 isVisible = true;
-             } else {
-                 // RECURSIVE CHECK: Parent must be visible (in visibleCodes) AND Parent must be expanded
-                 if (visibleCodes.has(pCode!) && expandedRows.has(pCode!)) {
-                     isVisible = true;
-                 }
-             }
-
-             if (isVisible) {
-                 visibleCodes.add(code);
-                 result.push(node);
-             }
-        }
-    });
-
-    return result;
-  }, [balances, period, activeTab, viewMode, showDept, showCounterparty, showProject, showSubAccount, keyword, expandedRows]);
+        });
+        return result;
+    }
+  }, [balances, period, activeTab, viewMode, showDept, showCounterparty, showProject, showSubAccount, debouncedKeyword, expandedRows]);
 
   // Pagination Logic
   const totalPages = Math.ceil(processedData.length / ITEMS_PER_PAGE);
@@ -267,7 +275,7 @@ const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config
   };
 
   const expandAll = () => {
-      setExpandedRows(new Set()); // Simple clear to reset state, implies collapse all or use logic to find all parents
+      setExpandedRows(new Set()); // Simple clear/reset behavior as a refresh
   };
   
   const collapseAll = () => setExpandedRows(new Set());
@@ -275,8 +283,8 @@ const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config
   const handleExport = () => {
     if (processedData.length === 0) return;
     const worksheet = XLSX.utils.json_to_sheet(processedData.map(r => ({
-        '科目编码': r.subjectCode,
-        '科目名称': r.subjectName,
+        '科目/部门编码': r.subjectCode,
+        '名称': r.subjectName,
         '成本中心名称': r.costCenterName || r.costCenter || '',
         '项目名称': r.projectName || '',
         '子目名称': r.subAccountName || '',
@@ -295,10 +303,7 @@ const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config
   const renderDualLine = (name: string | undefined, code: string | undefined, placeholder: string = '-') => {
     const hasName = name && name !== '缺省' && name !== 'Default';
     const hasCode = code && code !== '0' && code !== '缺省';
-    
-    // Compact View for empty cells
     if (!hasName && !hasCode) return <span className="text-slate-300">-</span>;
-
     return (
       <div className="flex flex-col max-w-[160px]">
         <span className="font-bold text-slate-700 text-xs truncate" title={name}>{hasName ? name : placeholder}</span>
@@ -345,14 +350,13 @@ const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config
 
             {/* Right: View Modes & Actions */}
             <div className="flex items-center gap-2">
-                <div className="bg-slate-100 p-1 rounded-lg flex gap-1 mr-2">
+                <div className="bg-slate-100 p-1 rounded-lg flex gap-1 mr-2 hidden lg:flex">
                     <button 
                         onClick={() => setViewMode('tree')}
                         className={`p-1.5 rounded-md transition-all flex items-center gap-1.5 px-2 ${viewMode === 'tree' ? 'bg-white shadow text-indigo-600 font-bold' : 'text-slate-400 hover:text-slate-600'}`}
                         title="树状视图"
                     >
-                        <FolderTree size={16} />
-                        <span className="text-xs">树状</span>
+                        <Layers size={16} />
                     </button>
                     <button 
                         onClick={() => setViewMode('list')}
@@ -360,23 +364,22 @@ const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config
                         title="列表视图"
                     >
                         <List size={16} />
-                        <span className="text-xs">列表</span>
                     </button>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 hidden lg:flex">
                     <button onClick={() => setShowDept(!showDept)} className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border ${showDept ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-white text-slate-500 hover:bg-slate-50'}`}>成本中心</button>
                     <button onClick={() => setShowProject(!showProject)} className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border ${showProject ? 'bg-purple-50 border-purple-200 text-purple-600' : 'bg-white text-slate-500 hover:bg-slate-50'}`}>项目</button>
                     <button onClick={() => setShowSubAccount(!showSubAccount)} className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border ${showSubAccount ? 'bg-orange-50 border-orange-200 text-orange-600' : 'bg-white text-slate-500 hover:bg-slate-50'}`}>子目</button>
                     <button onClick={() => setShowCounterparty(!showCounterparty)} className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border ${showCounterparty ? 'bg-blue-50 border-blue-200 text-blue-600' : 'bg-white text-slate-500 hover:bg-slate-50'}`}>往来</button>
                 </div>
                 
-                {viewMode === 'tree' && !keyword && (
+                {viewMode === 'tree' && !debouncedKeyword && (
                      <div className="flex gap-2 ml-2">
-                        <button onClick={expandAll} className="flex items-center gap-1 text-xs font-bold text-slate-500 hover:text-indigo-600 px-2 py-1.5 hover:bg-slate-50 rounded">
+                        <button onClick={expandAll} className="flex items-center gap-1 text-xs font-bold text-slate-500 hover:text-indigo-600 px-2 py-1.5 hover:bg-slate-50 rounded" title="折叠所有/重置">
                             <PlusSquare size={14} />
                         </button>
-                        <button onClick={collapseAll} className="flex items-center gap-1 text-xs font-bold text-slate-500 hover:text-indigo-600 px-2 py-1.5 hover:bg-slate-50 rounded">
+                        <button onClick={collapseAll} className="flex items-center gap-1 text-xs font-bold text-slate-500 hover:text-indigo-600 px-2 py-1.5 hover:bg-slate-50 rounded" title="折叠所有">
                             <MinusSquare size={14} />
                         </button>
                     </div>
@@ -429,7 +432,7 @@ const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config
                     {/* Subject Column: Unified Style for Tree & List */}
                     <td className="px-6 py-3">
                         <div className="flex items-center" style={{ paddingLeft: viewMode === 'tree' ? `${(row.level || 0) * 20}px` : '0px' }}>
-                            {viewMode === 'tree' && row.hasChildren && !keyword ? (
+                            {viewMode === 'tree' && row.hasChildren && !debouncedKeyword ? (
                                 <button 
                                     onClick={() => toggleRow(row.subjectCode)}
                                     className="p-1 mr-1 text-slate-400 hover:text-indigo-600 rounded hover:bg-slate-200 transition-colors flex-shrink-0"
@@ -440,12 +443,14 @@ const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config
                                 viewMode === 'tree' && <div className="w-6 mr-1 flex-shrink-0" />
                             )}
                             <div className="flex flex-col">
-                                <span className={`truncate max-w-[240px] font-bold text-slate-700 text-xs`} title={row.subjectName}>
+                                <span className={`truncate max-w-[240px] font-bold ${row.level===0 ? 'text-slate-900' : 'text-slate-600'} text-xs`} title={row.subjectName}>
                                     {row.subjectName}
                                 </span>
-                                <span className="text-[10px] font-mono text-slate-400">
-                                    {row.subjectCode}
-                                </span>
+                                {row.level! > 0 && (
+                                    <span className="text-[10px] font-mono text-slate-400">
+                                        {row.subjectCode}
+                                    </span>
+                                )}
                             </div>
                         </div>
                     </td>
@@ -457,16 +462,18 @@ const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config
                     {showSubAccount && <td className="px-6 py-3 text-xs font-medium text-orange-600 truncate max-w-[160px]">{renderDualLine(row.subAccountName, row.subAccountCode)}</td>}
                     {showCounterparty && <td className="px-6 py-3 text-xs font-medium text-blue-600 truncate max-w-[200px]">{renderDualLine(row.counterpartyName || row.counterparty, row.counterpartyCode)}</td>}
 
-                    <td className="px-6 py-3 text-right text-slate-400 font-mono text-xs">¥{row.openingBalance.toLocaleString()}</td>
-                    <td className="px-6 py-3 text-right text-slate-600 font-mono text-xs">¥{row.debitPeriod.toLocaleString()}</td>
-                    <td className="px-6 py-3 text-right text-slate-600 font-mono text-xs">¥{row.creditPeriod.toLocaleString()}</td>
-                    <td className={`px-6 py-3 text-right font-mono font-bold text-sm ${row.closingBalance < 0 ? 'text-red-600' : 'text-slate-900'}`}>¥{row.closingBalance.toLocaleString()}</td>
-                    <td className="px-6 py-3 text-right text-slate-400 font-mono text-xs">¥{row.lastYearClosingBalance?.toLocaleString() || '0'}</td>
+                    <td className="px-6 py-3 text-right text-slate-400 font-mono text-xs">{formatCurrency(row.openingBalance, privacyMode)}</td>
+                    <td className="px-6 py-3 text-right text-slate-600 font-mono text-xs">{formatCurrency(row.debitPeriod, privacyMode)}</td>
+                    <td className="px-6 py-3 text-right text-slate-600 font-mono text-xs">{formatCurrency(row.creditPeriod, privacyMode)}</td>
+                    <td className={`px-6 py-3 text-right font-mono font-bold text-sm ${row.closingBalance < 0 ? 'text-red-600' : 'text-slate-900'}`}>{formatCurrency(row.closingBalance, privacyMode)}</td>
+                    <td className="px-6 py-3 text-right text-slate-400 font-mono text-xs">{formatCurrency(row.lastYearClosingBalance, privacyMode)}</td>
                     
                     <td className="px-6 py-3 text-center">
-                        <button onClick={() => onDrillDown(row.subjectCode, period)} className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors flex items-center gap-1 mx-auto" title="查看明细账">
-                            <ArrowRightCircle size={16} />
-                        </button>
+                        {!row.hasChildren && (
+                            <button onClick={() => onDrillDown(row.subjectCode, period)} className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors flex items-center gap-1 mx-auto" title="查看明细账">
+                                <ArrowRightCircle size={16} />
+                            </button>
+                        )}
                     </td>
                 </tr>
                 )) : (

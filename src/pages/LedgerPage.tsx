@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { LedgerRow, SystemConfig, Company } from '../types';
 import { Search, Filter, Download, X, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, FileText, ArrowRightLeft, Sparkles, Loader2, MessageSquare } from 'lucide-react';
@@ -144,7 +143,7 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
       
       try {
           // 1. Get current valid periods to help AI map relative dates (e.g. "12月")
-          const validPeriods = Array.from(new Set(data.map(r => r.period))).sort();
+          const validPeriods = Array.from(new Set(data.map(r => String(r.period)))).sort();
           
           // 2. Parse Query
           const result = await parseNaturalLanguageQuery(nlqInput, validPeriods);

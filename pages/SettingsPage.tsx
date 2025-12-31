@@ -1,7 +1,8 @@
 
-import React, { useState, useEffect } from 'react';
-import { Save, LayoutTemplate, Building2, Tag, Plus, X, BookOpen, ArrowRightLeft, HelpCircle, Bot, Eye, EyeOff } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Save, LayoutTemplate, Building2, Tag, Plus, X, BookOpen, ArrowRightLeft, HelpCircle, Bot, Eye, EyeOff, Database, Download, Upload, Loader2, RefreshCw } from 'lucide-react';
 import { SystemConfig } from '../types';
+import { db } from '../db';
 
 interface SettingsPageProps {
   config: SystemConfig;
@@ -21,6 +22,11 @@ const SettingsPage = ({ config, onSave }: SettingsPageProps) => {
   // API Key State
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
+
+  // Backup State
+  const [isBackingUp, setIsBackingUp] = useState(false);
+  const [isRestoring, setIsRestoring] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const storedKey = localStorage.getItem('DASHSCOPE_API_KEY');
@@ -76,6 +82,103 @@ const SettingsPage = ({ config, onSave }: SettingsPageProps) => {
     setTimeout(() => setMsg(''), 3000);
   };
 
+  // --- Backup & Restore Logic ---
+
+  const handleBackup = async () => {
+    setIsBackingUp(true);
+    try {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const exportData: any = {
+            version: "v4.1",
+            date: timestamp,
+            config: formData,
+            tables: {}
+        };
+
+        // Export all tables
+        exportData.tables.ledger = await db.ledger.toArray();
+        exportData.tables.balances = await db.balances.toArray();
+        exportData.tables.history = await db.history.toArray();
+
+        // Create Blob
+        const blob = new Blob([JSON.stringify(exportData)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        
+        // Trigger Download
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `finance_master_backup_${timestamp}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        setMsg('数据库备份已下载');
+        setTimeout(() => setMsg(''), 3000);
+    } catch (e) {
+        console.error("Backup failed", e);
+        alert("备份失败，请检查控制台日志。");
+    } finally {
+        setIsBackingUp(false);
+    }
+  };
+
+  const handleRestoreClick = () => {
+      if (fileInputRef.current) {
+          fileInputRef.current.value = '';
+          fileInputRef.current.click();
+      }
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+
+      if (!window.confirm("警告：恢复备份将覆盖当前所有数据（包括配置、流水、余额表）。此操作不可撤销！\n\n确定要继续吗？")) {
+          return;
+      }
+
+      setIsRestoring(true);
+      const reader = new FileReader();
+      reader.onload = async (event) => {
+          try {
+              const jsonStr = event.target?.result as string;
+              const data = JSON.parse(jsonStr);
+
+              if (!data.tables || !data.config) {
+                  throw new Error("无效的备份文件格式");
+              }
+
+              // Restore
+              await (db as any).transaction('rw', db.ledger, db.balances, db.history, async () => {
+                  // Clear existing
+                  await db.ledger.clear();
+                  await db.balances.clear();
+                  await db.history.clear();
+
+                  // Add new
+                  if (data.tables.ledger?.length) await db.ledger.bulkAdd(data.tables.ledger);
+                  if (data.tables.balances?.length) await db.balances.bulkAdd(data.tables.balances);
+                  if (data.tables.history?.length) await db.history.bulkAdd(data.tables.history);
+              });
+
+              // Restore Config
+              onSave(data.config);
+              setFormData(data.config); // Update local state
+              
+              alert(`数据恢复成功！\n\n已恢复:\n- ${data.tables.ledger?.length || 0} 条明细\n- ${data.tables.balances?.length || 0} 条余额\n- 配置信息`);
+              window.location.reload(); // Reload to refresh all states
+
+          } catch (err) {
+              console.error("Restore failed", err);
+              alert("恢复失败：文件格式不正确或数据损坏。");
+          } finally {
+              setIsRestoring(false);
+          }
+      };
+      reader.readAsText(file);
+  };
+
   return (
     <div className="max-w-5xl mx-auto space-y-8 pb-20">
       
@@ -85,45 +188,85 @@ const SettingsPage = ({ config, onSave }: SettingsPageProps) => {
         <p className="text-slate-500 mt-1">配置财务科目的识别规则、部门字典、关联方逻辑以及 AI 引擎。</p>
       </div>
 
-      {/* 0. AI Engine Config */}
-      <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm space-y-6">
-        <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
-            <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg">
-                <Bot size={20} />
-            </div>
-            <div>
-                <h3 className="font-bold text-slate-800">AI 智能引擎配置</h3>
-                <p className="text-xs text-slate-400">配置通义千问 (Qwen) API 以启用智能对账与凭证匹配功能</p>
-            </div>
-        </div>
-        <div className="flex gap-4 items-end">
-            <div className="flex-1">
-                <label className="text-xs font-bold text-slate-600 mb-2 block">DashScope API Key</label>
-                <div className="relative">
-                    <input 
-                        type={showKey ? "text" : "password"} 
-                        value={apiKey}
-                        onChange={(e) => setApiKey(e.target.value)}
-                        placeholder="sk-..."
-                        className="w-full pl-4 pr-10 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-mono focus:border-indigo-500 focus:bg-white outline-none transition-all"
-                    />
-                    <button 
-                        onClick={() => setShowKey(!showKey)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-indigo-600"
-                    >
-                        {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
-                    </button>
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
+        
+        {/* 0. Data Management (Backup/Restore) - New Feature */}
+        <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm space-y-6">
+            <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
+                <div className="p-2 bg-emerald-50 text-emerald-600 rounded-lg">
+                    <Database size={20} />
                 </div>
-                <p className="text-[10px] text-slate-400 mt-2">
-                    Key 仅存储在本地浏览器 LocalStorage 中，不会上传至任何服务器。
-                </p>
+                <div>
+                    <h3 className="font-bold text-slate-800">数据安全与管理</h3>
+                    <p className="text-xs text-slate-400">导出全库备份或从备份文件恢复</p>
+                </div>
             </div>
-            <button 
-                onClick={handleSaveApiKey}
-                className="px-6 py-2.5 bg-indigo-50 text-indigo-600 font-bold rounded-xl hover:bg-indigo-100 border border-indigo-200 transition-all h-[42px] mb-[22px]"
-            >
-                保存 Key
-            </button>
+            
+            <div className="flex gap-4">
+                <button 
+                    onClick={handleBackup}
+                    disabled={isBackingUp}
+                    className="flex-1 py-4 bg-slate-50 border border-slate-200 rounded-xl hover:bg-slate-100 transition flex flex-col items-center justify-center gap-2 group"
+                >
+                    {isBackingUp ? <Loader2 className="animate-spin text-slate-400"/> : <Download className="text-slate-400 group-hover:text-slate-600" />}
+                    <span className="text-sm font-bold text-slate-600 group-hover:text-slate-800">导出全库备份 (.json)</span>
+                </button>
+
+                <button 
+                    onClick={handleRestoreClick}
+                    disabled={isRestoring}
+                    className="flex-1 py-4 bg-slate-50 border border-slate-200 rounded-xl hover:bg-red-50 hover:border-red-100 transition flex flex-col items-center justify-center gap-2 group"
+                >
+                    <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept=".json" />
+                    {isRestoring ? <RefreshCw className="animate-spin text-red-400"/> : <Upload className="text-slate-400 group-hover:text-red-500" />}
+                    <span className="text-sm font-bold text-slate-600 group-hover:text-red-600">恢复备份数据</span>
+                </button>
+            </div>
+            <p className="text-[10px] text-slate-400 leading-relaxed">
+                提示：备份文件包含所有账套的配置、明细账和余额表数据。恢复操作将<span className="text-red-500 font-bold">覆盖现有所有数据</span>，请谨慎操作。
+            </p>
+        </div>
+
+        {/* 0.5 AI Engine Config */}
+        <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm space-y-6">
+            <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
+                <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg">
+                    <Bot size={20} />
+                </div>
+                <div>
+                    <h3 className="font-bold text-slate-800">AI 智能引擎配置</h3>
+                    <p className="text-xs text-slate-400">配置通义千问 (Qwen) API 以启用智能对账与凭证匹配功能</p>
+                </div>
+            </div>
+            <div className="flex gap-4 items-end">
+                <div className="flex-1">
+                    <label className="text-xs font-bold text-slate-600 mb-2 block">DashScope API Key</label>
+                    <div className="relative">
+                        <input 
+                            type={showKey ? "text" : "password"} 
+                            value={apiKey}
+                            onChange={(e) => setApiKey(e.target.value)}
+                            placeholder="sk-..."
+                            className="w-full pl-4 pr-10 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-mono focus:border-indigo-500 focus:bg-white outline-none transition-all"
+                        />
+                        <button 
+                            onClick={() => setShowKey(!showKey)}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-indigo-600"
+                        >
+                            {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                        </button>
+                    </div>
+                    <p className="text-[10px] text-slate-400 mt-2">
+                        Key 仅存储在本地浏览器 LocalStorage 中，不会上传至任何服务器。
+                    </p>
+                </div>
+                <button 
+                    onClick={handleSaveApiKey}
+                    className="px-6 py-2.5 bg-indigo-50 text-indigo-600 font-bold rounded-xl hover:bg-indigo-100 border border-indigo-200 transition-all h-[42px] mb-[22px]"
+                >
+                    保存 Key
+                </button>
+            </div>
         </div>
       </div>
 

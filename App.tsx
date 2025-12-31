@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   LayoutDashboard, TableProperties, ListFilter, Import, Settings, 
-  Search, Bell, ChevronRight, Building2, RefreshCw, KeyRound, Check
+  Search, Bell, ChevronRight, Building2, RefreshCw, KeyRound, Check, Eye, EyeOff
 } from 'lucide-react';
 import { db } from './db';
 
@@ -81,6 +81,9 @@ const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [apiKey, setApiKey] = useState<string>('');
   const [hasApiKey, setHasApiKey] = useState(false);
+  
+  // New: Privacy Mode
+  const [privacyMode, setPrivacyMode] = useState(false);
 
   // Check API Key on load (Non-blocking now)
   useEffect(() => {
@@ -199,7 +202,12 @@ const App: React.FC = () => {
 
   const renderContent = () => {
     if (isLoading) {
-      return <div className="flex h-full items-center justify-center text-slate-400">正在从本地数据库加载数据...</div>;
+      return (
+        <div className="flex h-full items-center justify-center space-x-3 text-slate-400">
+            <RefreshCw className="animate-spin" />
+            <span>正在从本地数据库加载数据...</span>
+        </div>
+      );
     }
 
     // Adding key={currentEntityId} forces React to destroy and recreate the component when entity changes.
@@ -214,6 +222,7 @@ const App: React.FC = () => {
             ledger={ledgerData} 
             config={config}
             onNavigate={(tab) => handleNavigate(tab)}
+            privacyMode={privacyMode} // Pass Privacy Mode
         />;
       case 'balances':
         return <BalancePage 
@@ -222,6 +231,7 @@ const App: React.FC = () => {
           onDrillDown={(code, period) => handleNavigate('ledger', { subjectCode: code, period })}
           config={config}
           currentEntity={currentEntity} 
+          privacyMode={privacyMode} // Pass Privacy Mode
         />;
       case 'ledger':
         return <LedgerPage 
@@ -230,6 +240,7 @@ const App: React.FC = () => {
           initialFilter={drillDownFilter}
           config={config}
           currentEntity={currentEntity}
+          privacyMode={privacyMode} // Pass Privacy Mode
         />;
       case 'import':
         return <ImportPage 
@@ -238,11 +249,12 @@ const App: React.FC = () => {
           onDataChanged={handleRefreshData}
           config={config}
           importHistory={importHistory}
+          onConfigUpdate={setConfig}
         />;
       case 'settings':
         return <SettingsPage config={config} onSave={(newConfig) => setConfig(newConfig)} />; 
       default:
-        return <DashboardPage key={currentEntityId} currentEntity={currentEntity} allEntities={config.entities} balances={balanceData} ledger={ledgerData} config={config} onNavigate={(tab) => handleNavigate(tab)} />;
+        return <DashboardPage key={currentEntityId} currentEntity={currentEntity} allEntities={config.entities} balances={balanceData} ledger={ledgerData} config={config} onNavigate={(tab) => handleNavigate(tab)} privacyMode={privacyMode} />;
     }
   };
 
@@ -267,7 +279,7 @@ const App: React.FC = () => {
           </div>
           <div>
             <h1 className="font-bold text-sm tracking-wide">Finance Master</h1>
-            <p className="text-[10px] text-slate-500 font-medium">集团财务数据中心 v3.7</p>
+            <p className="text-[10px] text-slate-500 font-medium">集团财务数据中心 v4.1</p>
           </div>
         </div>
 
@@ -323,12 +335,23 @@ const App: React.FC = () => {
             {isLoading && <RefreshCw size={16} className="animate-spin text-slate-400" />}
           </div>
           
-          <div className="flex items-center gap-6">
+          <div className="flex items-center gap-4 md:gap-6">
+            
+            {/* Privacy Toggle */}
+            <button 
+                onClick={() => setPrivacyMode(!privacyMode)}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-full border transition-all ${privacyMode ? 'bg-slate-800 text-white border-slate-700' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}
+                title={privacyMode ? "退出隐私模式" : "进入隐私模式 (隐藏金额)"}
+            >
+                {privacyMode ? <EyeOff size={14} /> : <Eye size={14} />}
+                <span className="text-xs font-bold hidden lg:inline">{privacyMode ? '已脱敏' : '隐私模式'}</span>
+            </button>
+
             {/* API Key Status Indicator */}
             {hasApiKey ? (
                 <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-slate-100 rounded-full border border-slate-200" title="AI 引擎已就绪">
                     <div className="w-2 h-2 rounded-full bg-emerald-500"></div>
-                    <span className="text-[10px] font-bold text-slate-500">AI Engine Ready</span>
+                    <span className="text-[10px] font-bold text-slate-500">AI Ready</span>
                 </div>
             ) : (
                 <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-red-50 rounded-full border border-red-100 cursor-pointer hover:bg-red-100" onClick={() => setActiveTab('settings')}>

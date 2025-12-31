@@ -13,6 +13,7 @@ import {
 import { BalanceRow, LedgerRow, Company, SystemConfig, AnalysisResult } from '../types';
 import { db } from '../db';
 import { analyzeInterCompanyRecon, smartVoucherMatch, detectFinancialAnomalies } from '../services/geminiService';
+import { formatCurrencyShort, formatCurrency } from '../utils/currency';
 
 interface DashboardPageProps {
   currentEntity: Company;
@@ -21,11 +22,12 @@ interface DashboardPageProps {
   ledger: LedgerRow[];
   config: SystemConfig;
   onNavigate: (tab: string) => void;
+  privacyMode: boolean; // New Prop
 }
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#64748b'];
 
-const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntities, balances, ledger, config, onNavigate }) => {
+const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntities, balances, ledger, config, onNavigate, privacyMode }) => {
   // --- Empty State Handling ---
   if (!balances || balances.length === 0) {
     return (
@@ -70,7 +72,6 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
     const ytdIncome = leafRows
         .filter(b => config.incomeSubjectCodes.some(code => b.subjectCode.startsWith(code)))
         .reduce((sum, b) => {
-            // Use YTD columns if available, else Period columns
             const cr = b.ytdCredit !== undefined ? b.ytdCredit : b.creditPeriod;
             const dr = b.ytdDebit !== undefined ? b.ytdDebit : b.debitPeriod;
             return sum + (cr - dr); // 收入：贷方 - 借方 (余额)
@@ -191,22 +192,9 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
   const isInterCompanyRow = (counterparty: string | undefined, otherEntity: Company) => {
     if (!counterparty) return false;
     const cp = counterparty.trim();
-    
-    // 1. Check exact segment code (most reliable)
-    if (otherEntity.segmentPrefix && cp.includes(otherEntity.segmentPrefix)) {
-        return true;
-    }
-    
-    // 2. Check Entity Name
-    if (cp.includes(otherEntity.name)) {
-        return true;
-    }
-
-    // 3. Check Matched Name Alias
-    if (otherEntity.matchedNameInOtherBooks && cp.includes(otherEntity.matchedNameInOtherBooks)) {
-        return true;
-    }
-
+    if (otherEntity.segmentPrefix && cp.includes(otherEntity.segmentPrefix)) return true;
+    if (cp.includes(otherEntity.name)) return true;
+    if (otherEntity.matchedNameInOtherBooks && cp.includes(otherEntity.matchedNameInOtherBooks)) return true;
     return false;
   };
 
@@ -223,61 +211,24 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
 
         const otherBalances = await db.balances.where('entityId').equals(other.id).toArray();
 
-        // 核心修正逻辑：根据主体性质切换借贷方向
-        // Listed Entity (Buyer/Payer) -> Focus on My Cost vs Their Revenue
-        // Non-Listed Entity (Seller/Receiver) -> Focus on My Revenue vs Their Cost
-        
         if (currentEntity.type === 'listed') {
-            myLabel = "我方成本 (Net Dr)";
-            theirLabel = "对方收入 (Net Cr)";
-
+            myLabel = "我方成本";
+            theirLabel = "对方收入";
             // My Side: Cost Subject + Counterparty = Other
-            myRows = balances.filter(b => 
-                config.costSubjectCodes.some(code => b.subjectCode.startsWith(code)) &&
-                isInterCompanyRow(b.counterparty, other)
-            );
-            myAmount = myRows.reduce((sum, b) => {
-                const dr = b.ytdDebit || b.debitPeriod;
-                const cr = b.ytdCredit || b.creditPeriod;
-                return sum + (dr - cr); // Net Debit
-            }, 0);
-
+            myRows = balances.filter(b => config.costSubjectCodes.some(code => b.subjectCode.startsWith(code)) && isInterCompanyRow(b.counterparty, other));
+            myAmount = myRows.reduce((sum, b) => sum + ((b.ytdDebit || b.debitPeriod) - (b.ytdCredit || b.creditPeriod)), 0);
             // Their Side: Income Subject + Counterparty = Me
-            theirRows = otherBalances.filter(b => 
-                config.incomeSubjectCodes.some(code => b.subjectCode.startsWith(code)) &&
-                isInterCompanyRow(b.counterparty, currentEntity)
-            );
-            theirAmount = theirRows.reduce((sum, b) => {
-                const cr = b.ytdCredit || b.creditPeriod;
-                const dr = b.ytdDebit || b.debitPeriod;
-                return sum + (cr - dr); // Net Credit
-            }, 0);
-
+            theirRows = otherBalances.filter(b => config.incomeSubjectCodes.some(code => b.subjectCode.startsWith(code)) && isInterCompanyRow(b.counterparty, currentEntity));
+            theirAmount = theirRows.reduce((sum, b) => sum + ((b.ytdCredit || b.creditPeriod) - (b.ytdDebit || b.debitPeriod)), 0);
         } else {
-            myLabel = "我方收入 (Net Cr)";
-            theirLabel = "对方成本 (Net Dr)";
-
+            myLabel = "我方收入";
+            theirLabel = "对方成本";
             // My Side: Income Subject + Counterparty = Other
-            myRows = balances.filter(b => 
-                config.incomeSubjectCodes.some(code => b.subjectCode.startsWith(code)) &&
-                isInterCompanyRow(b.counterparty, other)
-            );
-            myAmount = myRows.reduce((sum, b) => {
-                const cr = b.ytdCredit || b.creditPeriod;
-                const dr = b.ytdDebit || b.debitPeriod;
-                return sum + (cr - dr); // Net Credit
-            }, 0);
-
+            myRows = balances.filter(b => config.incomeSubjectCodes.some(code => b.subjectCode.startsWith(code)) && isInterCompanyRow(b.counterparty, other));
+            myAmount = myRows.reduce((sum, b) => sum + ((b.ytdCredit || b.creditPeriod) - (b.ytdDebit || b.debitPeriod)), 0);
             // Their Side: Cost Subject + Counterparty = Me
-            theirRows = otherBalances.filter(b => 
-                config.costSubjectCodes.some(code => b.subjectCode.startsWith(code)) &&
-                isInterCompanyRow(b.counterparty, currentEntity)
-            );
-            theirAmount = theirRows.reduce((sum, b) => {
-                const dr = b.ytdDebit || b.debitPeriod;
-                const cr = b.ytdCredit || b.creditPeriod;
-                return sum + (dr - cr); // Net Debit
-            }, 0);
+            theirRows = otherBalances.filter(b => config.costSubjectCodes.some(code => b.subjectCode.startsWith(code)) && isInterCompanyRow(b.counterparty, currentEntity));
+            theirAmount = theirRows.reduce((sum, b) => sum + ((b.ytdDebit || b.debitPeriod) - (b.ytdCredit || b.creditPeriod)), 0);
         }
 
         // C. 月度明细
@@ -376,6 +327,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
           period={latestPeriod}
           color="blue"
           icon={<TrendingUp size={24} className="text-white opacity-80" />}
+          privacyMode={privacyMode}
         />
         <ExecutiveCard 
           title="累计成本费用" 
@@ -387,6 +339,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
           isInverse={true} // 成本增长标红
           color="orange"
           icon={<TrendingDown size={24} className="text-white opacity-80" />}
+          privacyMode={privacyMode}
         />
         <ExecutiveCard 
           title="经营毛利" 
@@ -395,6 +348,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
           subValue={`${profitMargin.toFixed(1)}%`}
           color="emerald"
           icon={<Wallet size={24} className="text-white opacity-80" />}
+          privacyMode={privacyMode}
         />
         {/* 对账状态卡片 */}
         <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex flex-col justify-between relative overflow-hidden group">
@@ -480,30 +434,37 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
                 )}
 
                 <div className="h-[320px] w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart data={trendData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                        <defs>
-                            <linearGradient id="colorInc" x1="0" y1="0" x2="0" y2="1">
-                                <stop offset="5%" stopColor="#10b981" stopOpacity={0.1}/>
-                                <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
-                            </linearGradient>
-                            <linearGradient id="colorProf" x1="0" y1="0" x2="0" y2="1">
-                                <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.1}/>
-                                <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
-                            </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                        <XAxis dataKey="period" axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#94a3b8'}} dy={10} />
-                        <YAxis axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#94a3b8'}} tickFormatter={(v) => `${(v/10000).toFixed(0)}w`} />
-                        <Tooltip 
-                            contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 20px rgba(0,0,0,0.05)' }}
-                            formatter={(val:number) => `¥${val.toLocaleString()}`}
-                        />
-                        <Area type="monotone" dataKey="income" name="收入" stroke="#10b981" strokeWidth={3} fillOpacity={1} fill="url(#colorInc)" />
-                        <Area type="monotone" dataKey="profit" name="利润" stroke="#3b82f6" strokeWidth={3} fillOpacity={1} fill="url(#colorProf)" />
-                        <Area type="monotone" dataKey="cost" name="成本" stroke="#fbbf24" strokeWidth={2} strokeDasharray="5 5" fill="transparent" />
-                        </AreaChart>
-                    </ResponsiveContainer>
+                    {anomalyLoading ? (
+                        // Skeleton Loading for Chart Area
+                        <div className="w-full h-full bg-slate-50 rounded-xl animate-pulse flex items-center justify-center">
+                            <span className="text-slate-300 text-sm font-bold">AI 正在分析趋势...</span>
+                        </div>
+                    ) : (
+                        <ResponsiveContainer width="100%" height="100%">
+                            <AreaChart data={trendData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                            <defs>
+                                <linearGradient id="colorInc" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.1}/>
+                                    <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
+                                </linearGradient>
+                                <linearGradient id="colorProf" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.1}/>
+                                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                                </linearGradient>
+                            </defs>
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                            <XAxis dataKey="period" axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#94a3b8'}} dy={10} />
+                            <YAxis axisLine={false} tickLine={false} tick={{fontSize: 12, fill: '#94a3b8'}} tickFormatter={(v) => privacyMode ? '***' : `${(v/10000).toFixed(0)}w`} />
+                            <Tooltip 
+                                contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 20px rgba(0,0,0,0.05)' }}
+                                formatter={(val:number) => formatCurrency(val, privacyMode)}
+                            />
+                            <Area type="monotone" dataKey="income" name="收入" stroke="#10b981" strokeWidth={3} fillOpacity={1} fill="url(#colorInc)" />
+                            <Area type="monotone" dataKey="profit" name="利润" stroke="#3b82f6" strokeWidth={3} fillOpacity={1} fill="url(#colorProf)" />
+                            <Area type="monotone" dataKey="cost" name="成本" stroke="#fbbf24" strokeWidth={2} strokeDasharray="5 5" fill="transparent" />
+                            </AreaChart>
+                        </ResponsiveContainer>
+                    )}
                 </div>
             </div>
 
@@ -524,7 +485,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
                               <span className="text-sm text-slate-600 font-medium group-hover:text-slate-900">{item.name}</span>
                            </div>
                            <div className="text-right">
-                              <span className="text-sm font-bold text-slate-800">¥{(item.value / 10000).toFixed(1)}w</span>
+                              <span className="text-sm font-bold text-slate-800">{formatCurrencyShort(item.value, privacyMode)}</span>
                               <span className="text-[10px] text-slate-400 ml-2">
                                  {annualStats.cost > 0 ? ((item.value / annualStats.cost) * 100).toFixed(1) : 0}%
                               </span>
@@ -550,13 +511,13 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
                               <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} strokeWidth={0} />
                            ))}
                         </Pie>
-                        <Tooltip formatter={(val:number) => `¥${val.toLocaleString()}`} />
+                        <Tooltip formatter={(val:number) => formatCurrency(val, privacyMode)} />
                      </PieChart>
                   </ResponsiveContainer>
                   {/* Center Text */}
                   <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
                      <span className="text-xs text-slate-400 font-bold uppercase">总成本</span>
-                     <span className="text-lg font-black text-slate-800">¥{(annualStats.cost/10000).toFixed(0)}w</span>
+                     <span className="text-lg font-black text-slate-800">{formatCurrencyShort(annualStats.cost, privacyMode)}</span>
                   </div>
                </div>
             </div>
@@ -574,10 +535,19 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
 
           <div className="flex-1 overflow-y-auto space-y-4 pr-1 scrollbar-thin">
             {reconLoading ? (
-                <div className="flex flex-col items-center justify-center h-40 text-slate-400 gap-2">
-                    <Activity className="animate-spin" />
-                    <span className="text-xs">正在实时对账...</span>
-                </div>
+                // Skeleton List
+                [1,2,3].map(i => (
+                    <div key={i} className="p-4 rounded-2xl border border-slate-100 bg-white animate-pulse">
+                        <div className="flex justify-between items-center mb-4">
+                            <div className="h-4 bg-slate-200 rounded w-1/3"></div>
+                            <div className="w-8 h-8 bg-slate-200 rounded-full"></div>
+                        </div>
+                        <div className="space-y-2">
+                            <div className="h-3 bg-slate-200 rounded w-full"></div>
+                            <div className="h-3 bg-slate-200 rounded w-3/4"></div>
+                        </div>
+                    </div>
+                ))
             ) : reconData.length > 0 ? (
                 reconData.map((item, idx) => (
                     <div 
@@ -610,16 +580,16 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
                         <div className="space-y-2">
                             <div className="flex justify-between text-xs">
                                 <span className="text-slate-400">{item.myLabel}</span>
-                                <span className="font-mono font-medium text-slate-700">¥{item.myAmount.toLocaleString()}</span>
+                                <span className="font-mono font-medium text-slate-700">{formatCurrency(item.myAmount, privacyMode)}</span>
                             </div>
                             <div className="flex justify-between text-xs">
                                 <span className="text-slate-400">{item.theirLabel}</span>
-                                <span className="font-mono font-medium text-slate-700">¥{item.theirAmount.toLocaleString()}</span>
+                                <span className="font-mono font-medium text-slate-700">{formatCurrency(item.theirAmount, privacyMode)}</span>
                             </div>
                             {item.status === 'unmatched' && (
                                 <div className="pt-2 border-t border-red-100 flex justify-between text-xs text-red-600 font-bold">
                                     <span>差异金额</span>
-                                    <span>{Math.abs(item.diff).toLocaleString()}</span>
+                                    <span>{formatCurrency(Math.abs(item.diff), privacyMode)}</span>
                                 </div>
                             )}
                         </div>
@@ -646,6 +616,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
           aiResult={aiResult}
           onRunAI={handleRunAIAnalysis}
           aiAnalyzing={aiAnalyzing}
+          privacyMode={privacyMode} // Pass Privacy Mode
         />
       )}
     </div>
@@ -654,7 +625,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
 
 // --- Sub Components ---
 
-const ReconciliationModal = ({ data, currentEntity, otherEntityId, config, onClose, aiResult, onRunAI, aiAnalyzing }: any) => {
+const ReconciliationModal = ({ data, currentEntity, otherEntityId, config, onClose, aiResult, onRunAI, aiAnalyzing, privacyMode }: any) => {
   const [expandedPeriod, setExpandedPeriod] = useState<string | null>(null);
   
   return (
@@ -697,10 +668,10 @@ const ReconciliationModal = ({ data, currentEntity, otherEntityId, config, onClo
                                 onClick={() => setExpandedPeriod(expandedPeriod === m.period ? null : m.period)}
                               >
                                   <td className="px-6 py-4 font-mono font-bold text-slate-700">{m.period}</td>
-                                  <td className="px-6 py-4 text-right font-mono text-slate-600">{m.myVal.toLocaleString()}</td>
-                                  <td className="px-6 py-4 text-right font-mono text-slate-600">{m.theirVal.toLocaleString()}</td>
+                                  <td className="px-6 py-4 text-right font-mono text-slate-600">{formatCurrency(m.myVal, privacyMode)}</td>
+                                  <td className="px-6 py-4 text-right font-mono text-slate-600">{formatCurrency(m.theirVal, privacyMode)}</td>
                                   <td className={`px-6 py-4 text-right font-mono font-bold ${m.diff !== 0 ? 'text-red-500' : 'text-slate-300'}`}>
-                                      {m.diff !== 0 ? m.diff.toLocaleString() : '-'}
+                                      {m.diff !== 0 ? formatCurrency(m.diff, privacyMode) : '-'}
                                   </td>
                                   <td className="px-6 py-4 text-center">
                                       {m.status === 'matched' ? (
@@ -728,6 +699,7 @@ const ReconciliationModal = ({ data, currentEntity, otherEntityId, config, onClo
                                       otherMatchedName={data.matchedName}
                                       config={config}
                                       currentEntity={currentEntity}
+                                      privacyMode={privacyMode}
                                     />
                                   </td>
                                 </tr>
@@ -783,7 +755,7 @@ const ReconciliationModal = ({ data, currentEntity, otherEntityId, config, onClo
   );
 };
 
-const VoucherMatchingDetail = ({ period, currentEntityId, otherEntityId, otherEntityName, otherMatchedName, config, currentEntity }: any) => {
+const VoucherMatchingDetail = ({ period, currentEntityId, otherEntityId, otherEntityName, otherMatchedName, config, currentEntity, privacyMode }: any) => {
   const [loading, setLoading] = useState(false);
   const [myVouchers, setMyVouchers] = useState<LedgerRow[]>([]);
   const [theirVouchers, setTheirVouchers] = useState<LedgerRow[]>([]);
@@ -901,7 +873,7 @@ const VoucherMatchingDetail = ({ period, currentEntityId, otherEntityId, otherEn
           <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
              <div className="bg-slate-50 px-3 py-2 border-b border-slate-200 text-xs font-bold text-slate-600 flex justify-between">
                 <span>我方 - {myVouchers.length} 笔</span>
-                <span>¥{myVouchers.reduce((sum,v)=>sum+(v.debitAmount||v.creditAmount),0).toLocaleString()}</span>
+                <span>{formatCurrency(myVouchers.reduce((sum,v)=>sum+(v.debitAmount||v.creditAmount),0), privacyMode)}</span>
              </div>
              <div className="max-h-[300px] overflow-y-auto">
                <table className="w-full text-xs">
@@ -912,7 +884,7 @@ const VoucherMatchingDetail = ({ period, currentEntityId, otherEntityId, otherEn
                          <tr key={v.id} className={`${isUnmatched ? 'bg-red-50' : 'hover:bg-slate-50'}`}>
                            <td className="p-2 font-mono text-blue-600">{v.voucherNo}</td>
                            <td className="p-2 truncate max-w-[120px]" title={v.summary}>{v.summary}</td>
-                           <td className="p-2 text-right font-mono font-bold">¥{(v.debitAmount||v.creditAmount).toLocaleString()}</td>
+                           <td className="p-2 text-right font-mono font-bold">{formatCurrency((v.debitAmount||v.creditAmount), privacyMode)}</td>
                          </tr>
                        );
                     })}
@@ -926,7 +898,7 @@ const VoucherMatchingDetail = ({ period, currentEntityId, otherEntityId, otherEn
           <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
              <div className="bg-slate-50 px-3 py-2 border-b border-slate-200 text-xs font-bold text-slate-600 flex justify-between">
                 <span>对方 - {theirVouchers.length} 笔</span>
-                <span>¥{theirVouchers.reduce((sum,v)=>sum+(v.debitAmount||v.creditAmount),0).toLocaleString()}</span>
+                <span>{formatCurrency(theirVouchers.reduce((sum,v)=>sum+(v.debitAmount||v.creditAmount),0), privacyMode)}</span>
              </div>
              <div className="max-h-[300px] overflow-y-auto">
                <table className="w-full text-xs">
@@ -937,7 +909,7 @@ const VoucherMatchingDetail = ({ period, currentEntityId, otherEntityId, otherEn
                          <tr key={v.id} className={`${isUnmatched ? 'bg-orange-50' : 'hover:bg-slate-50'}`}>
                            <td className="p-2 font-mono text-blue-600">{v.voucherNo}</td>
                            <td className="p-2 truncate max-w-[120px]" title={v.summary}>{v.summary}</td>
-                           <td className="p-2 text-right font-mono font-bold">¥{(v.debitAmount||v.creditAmount).toLocaleString()}</td>
+                           <td className="p-2 text-right font-mono font-bold">{formatCurrency((v.debitAmount||v.creditAmount), privacyMode)}</td>
                          </tr>
                        );
                     })}
@@ -953,7 +925,7 @@ const VoucherMatchingDetail = ({ period, currentEntityId, otherEntityId, otherEn
 
 // --- Components ---
 
-const ExecutiveCard = ({ title, amount, mom, yoy, hasYoy, period, isInverse, subLabel, subValue, color, icon }: any) => {
+const ExecutiveCard = ({ title, amount, mom, yoy, hasYoy, period, isInverse, subLabel, subValue, color, icon, privacyMode }: any) => {
   const gradients: any = {
     blue: "from-blue-500 to-indigo-600",
     orange: "from-orange-400 to-pink-500",
@@ -961,9 +933,6 @@ const ExecutiveCard = ({ title, amount, mom, yoy, hasYoy, period, isInverse, sub
   };
 
   const renderTrend = (value: number, label: string) => {
-      // 简化逻辑：只展示数值方向，具体好坏由使用者结合业务判断
-      // 如果要严格颜色逻辑：Inverse模式下，增长(>0)是不好的(Red)，下降(<0)是好的(Green)
-      // 但因为卡片本身有底色，这里使用统一的白色/半透明样式，更显高级感
       return (
            <div className="flex items-center gap-1 bg-white/10 px-2 py-1 rounded-lg backdrop-blur-sm border border-white/10">
               {value > 0 ? <ArrowUpRight size={12} className="text-white"/> : value < 0 ? <ArrowDownRight size={12} className="text-white"/> : <Activity size={12} className="text-white"/>}
@@ -983,9 +952,15 @@ const ExecutiveCard = ({ title, amount, mom, yoy, hasYoy, period, isInverse, sub
           <div>
             <p className="text-xs font-bold text-white/80 uppercase tracking-wide">{title}</p>
             <h3 className="text-3xl font-black mt-2">
-                <span className="text-sm align-top opacity-80 mr-1">¥</span>
-                {(amount / 10000).toFixed(2)}
-                <span className="text-sm align-baseline opacity-80 ml-1">w</span>
+                {privacyMode ? (
+                    <span>****</span>
+                ) : (
+                    <>
+                        <span className="text-sm align-top opacity-80 mr-1">¥</span>
+                        {(amount / 10000).toFixed(2)}
+                        <span className="text-sm align-baseline opacity-80 ml-1">w</span>
+                    </>
+                )}
             </h3>
           </div>
           <div className="p-2 bg-white/20 rounded-lg backdrop-blur-sm">

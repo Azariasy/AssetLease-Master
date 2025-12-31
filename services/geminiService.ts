@@ -22,7 +22,7 @@ const callQwenAPI = async (messages: any[], model: string = "qwen-plus") => {
     body: JSON.stringify({
       model: model,
       messages: messages,
-      response_format: { type: "json_object" } // Force JSON output
+      response_format: { type: "json_object" } // Force JSON output where possible
     })
   });
 
@@ -263,5 +263,84 @@ export const extractContractData = async (base64Content: string, mimeType: strin
   } catch (error) {
     console.error("Contract Extraction Failed:", error);
     throw error;
+  }
+};
+
+// NEW: 自然语言查询解析 (LedgerPage NLQ Search)
+export const parseNaturalLanguageQuery = async (query: string, validPeriods: string[] = []) => {
+  const prompt = `
+    任务：将用户的自然语言查询解析为财务流水账的筛选条件。
+    
+    查询内容: "${query}"
+    
+    系统当前存在的会计期间 (Valid Periods): ${JSON.stringify(validPeriods)}
+    
+    请提取以下字段（JSON格式）：
+    - period: 会计期间 (YYYY-MM)。
+      规则：如果用户提到月份（如“12月”），必须优先在 Valid Periods 中寻找匹配的年份（如 '2024-12'）。
+      如果用户没有提到时间，返回空字符串。
+    - subjectCode: 科目代码 (纯数字)。如果提到具体科目但无代码，可留空。
+    - keyword: 搜索关键词。用于匹配摘要、往来单位、金额等。请提取公司名、业务名等核心词。
+
+    示例 1：
+    Valid Periods: ["2023-12", "2024-01"]
+    用户: "查一下12月的研发费用"
+    返回: { "period": "2023-12", "subjectCode": "", "keyword": "研发费用" }
+
+    示例 2：
+    Valid Periods: ["2024-11", "2024-12"]
+    用户: "成都燃气公司的往来账"
+    返回: { "period": "", "subjectCode": "", "keyword": "成都燃气" }
+  `;
+
+  try {
+    const content = await callQwenAPI([
+      { role: "system", content: "你是一个精确的语义解析助手，只返回 JSON。" },
+      { role: "user", content: prompt }
+    ], "qwen-plus");
+
+    const jsonStr = content.replace(/```json\n?|```/g, '').trim();
+    const result = JSON.parse(jsonStr);
+    return {
+        period: result.period || '',
+        subjectCode: result.subjectCode || '',
+        keyword: result.keyword || ''
+    };
+  } catch (error) {
+    console.error("NLQ Failed:", error);
+    // Fallback
+    return { period: '', subjectCode: '', keyword: query };
+  }
+};
+
+// NEW: 生成自然语言回复
+export const generateNlqResponse = async (query: string, stats: any) => {
+  const prompt = `
+    任务：根据用户查询和系统查到的财务数据统计，生成一句简洁、友好的回答。
+    
+    用户问题: "${query}"
+    查得数据统计: ${JSON.stringify(stats)}
+    
+    字段说明：
+    - count: 记录条数
+    - totalDebit: 借方合计
+    - totalCredit: 贷方合计
+    - summaries: 主要的摘要内容（前几条）
+
+    要求：
+    1. 直接回答结果。例如：“找到了 3 笔相关记录，主要是支付燃气费，合计 2000 元。”
+    2. 如果没查到（count=0），请礼貌告知。
+    3. 不要返回 JSON，只返回文本字符串。
+  `;
+
+  try {
+    const content = await callQwenAPI([
+      { role: "system", content: "你是一个乐于助人的财务机器人。" },
+      { role: "user", content: prompt }
+    ], "qwen-plus");
+
+    return content.replace(/['"]/g, ''); // Simple cleanup
+  } catch (error) {
+    return `查询完成，共找到 ${stats.count} 条记录。`;
   }
 };

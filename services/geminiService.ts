@@ -180,6 +180,54 @@ export const smartVoucherMatch = async (
 };
 
 
+// NEW: 财务异常波动检测 (DashboardPage 趋势分析使用)
+export const detectFinancialAnomalies = async (
+  entityName: string,
+  trendData: any[]
+) => {
+  const prompt = `
+    任务：作为CFO助手，请分析 "${entityName}" 的月度财务趋势，识别异常波动。
+    
+    【月度数据】:
+    ${JSON.stringify(trendData)}
+
+    请识别：
+    1. 收入或成本环比波动超过 30% 的月份。
+    2. 利润率为负或极低的月份。
+    3. 长期趋势中的离群点。
+
+    请返回 JSON：
+    {
+      "anomalies": [
+        {
+          "period": "2024-02", 
+          "type": "cost_spike", 
+          "level": "high",
+          "description": "成本环比激增 50%，可能存在大额偶发性支出"
+        }
+      ],
+      "summary": "一句话整体评价 (如：上半年经营稳健，但5月成本控制需关注)"
+    }
+  `;
+
+  try {
+    const content = await callQwenAPI([
+      { role: "system", content: "你是一个敏锐的财务数据分析师。请以 JSON 格式回复。" },
+      { role: "user", content: prompt }
+    ], "qwen-plus");
+
+    const jsonStr = content.replace(/```json\n?|```/g, '').trim();
+    return JSON.parse(jsonStr);
+  } catch (error) {
+    console.error("Anomaly Detection Failed:", error);
+    return {
+      anomalies: [],
+      summary: "AI 分析服务暂时不可用。"
+    };
+  }
+};
+
+
 // AI 合同提取
 export const extractContractData = async (base64Content: string, mimeType: string) => {
   const prompt = `

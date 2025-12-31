@@ -213,6 +213,7 @@ const App: React.FC = () => {
             balances={balanceData} 
             ledger={ledgerData} 
             config={config}
+            onNavigate={(tab) => handleNavigate(tab)}
         />;
       case 'balances':
         return <BalancePage 
@@ -241,7 +242,7 @@ const App: React.FC = () => {
       case 'settings':
         return <SettingsPage config={config} onSave={(newConfig) => setConfig(newConfig)} />; 
       default:
-        return <DashboardPage key={currentEntityId} currentEntity={currentEntity} allEntities={config.entities} balances={balanceData} ledger={ledgerData} config={config} />;
+        return <DashboardPage key={currentEntityId} currentEntity={currentEntity} allEntities={config.entities} balances={balanceData} ledger={ledgerData} config={config} onNavigate={(tab) => handleNavigate(tab)} />;
     }
   };
 

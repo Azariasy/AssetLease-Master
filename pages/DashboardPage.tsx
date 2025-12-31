@@ -1,3 +1,4 @@
+
 import React, { useMemo, useState, useEffect } from 'react';
 import { 
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, 
@@ -11,7 +12,7 @@ import {
 } from 'lucide-react';
 import { BalanceRow, LedgerRow, Company, SystemConfig, AnalysisResult } from '../types';
 import { db } from '../db';
-import { analyzeInterCompanyRecon, smartVoucherMatch } from '../services/geminiService';
+import { analyzeInterCompanyRecon, smartVoucherMatch, detectFinancialAnomalies } from '../services/geminiService';
 
 interface DashboardPageProps {
   currentEntity: Company;
@@ -19,11 +20,12 @@ interface DashboardPageProps {
   balances: BalanceRow[];
   ledger: LedgerRow[];
   config: SystemConfig;
+  onNavigate: (tab: string) => void;
 }
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#64748b'];
 
-const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntities, balances, ledger, config }) => {
+const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntities, balances, ledger, config, onNavigate }) => {
   // --- Empty State Handling ---
   if (!balances || balances.length === 0) {
     return (
@@ -36,9 +38,12 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
                 主体 <span className="font-bold text-slate-700">{currentEntity.name}</span> 尚未导入任何财务数据。
                 <br/>请前往“数据导入”页面上传科目余额表。
             </p>
-            <div className="px-4 py-2 bg-indigo-50 text-indigo-600 rounded-lg text-sm font-bold flex items-center gap-2">
+            <button 
+              onClick={() => onNavigate('import')}
+              className="px-4 py-2 bg-indigo-50 text-indigo-600 rounded-lg text-sm font-bold flex items-center gap-2 hover:bg-indigo-100 transition-colors"
+            >
                 <Upload size={16} /> 请先导入数据
-            </div>
+            </button>
         </div>
     );
   }
@@ -122,7 +127,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
   const costYoY = getGrowthRate(annualStats.cost, annualStats.lastYearCost);
   
   // --- 2. 图表数据 (仍然基于月度数据 - 当月发生额) ---
-  const trendData = periods.map(p => {
+  const trendData = useMemo(() => periods.map(p => {
     const pRows = balances.filter(b => b.period === p);
     const leafRows = filterLeafNodes(pRows);
     
@@ -136,7 +141,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
       .reduce((sum, b) => sum + (b.debitPeriod - b.creditPeriod), 0); // Net Monthly Cost
       
     return { period: p, income: inc, cost: cst, profit: inc - cst };
-  });
+  }), [periods, balances, config]);
 
   const costStructureData = useMemo(() => {
     const map = new Map<string, number>();
@@ -178,6 +183,10 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
   // AI Analysis State
   const [aiAnalyzing, setAiAnalyzing] = useState(false);
   const [aiResult, setAiResult] = useState<AnalysisResult | null>(null);
+
+  // Anomaly Detection State
+  const [anomalyResult, setAnomalyResult] = useState<any>(null);
+  const [anomalyLoading, setAnomalyLoading] = useState(false);
 
   const isInterCompanyRow = (counterparty: string | undefined, otherEntity: Company) => {
     if (!counterparty) return false;
@@ -340,6 +349,19 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
     }
   };
 
+  const handleRunAnomalyDetection = async () => {
+    setAnomalyLoading(true);
+    setAnomalyResult(null);
+    try {
+      const result = await detectFinancialAnomalies(currentEntity.name, trendData);
+      setAnomalyResult(result);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setAnomalyLoading(false);
+    }
+  };
+
   return (
     <div className="space-y-6 relative pb-10">
       
@@ -406,8 +428,8 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
         
         {/* Left: Financial Trend & Profitability */}
         <div className="xl:col-span-2 space-y-6">
-            <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
-                <div className="flex justify-between items-center mb-6">
+            <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 relative overflow-hidden">
+                <div className="flex justify-between items-center mb-6 relative z-10">
                     <div>
                         <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
                             <Activity size={20} className="text-blue-500" />
@@ -417,12 +439,45 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
                           基于 {periods.length} 个会计期间数据
                         </p>
                     </div>
-                    <div className="flex items-center gap-2">
-                        <LegendBadge color="bg-emerald-500" label="收入" />
-                        <LegendBadge color="bg-amber-400" label="成本" />
-                        <LegendBadge color="bg-blue-500" label="利润" />
+                    <div className="flex items-center gap-4">
+                         <button 
+                            onClick={handleRunAnomalyDetection}
+                            disabled={anomalyLoading}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded-lg text-xs font-bold transition-all"
+                         >
+                            {anomalyLoading ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                            AI 异常检测
+                         </button>
+                        <div className="flex items-center gap-2 pl-2 border-l border-slate-100">
+                            <LegendBadge color="bg-emerald-500" label="收入" />
+                            <LegendBadge color="bg-amber-400" label="成本" />
+                            <LegendBadge color="bg-blue-500" label="利润" />
+                        </div>
                     </div>
                 </div>
+
+                {/* AI Anomaly Result Box */}
+                {anomalyResult && (
+                   <div className="mb-6 bg-indigo-50/50 border border-indigo-100 rounded-xl p-4 animate-in slide-in-from-top-4 fade-in">
+                       <div className="flex items-start gap-3">
+                           <div className="p-2 bg-white rounded-lg shadow-sm text-indigo-500"><Lightbulb size={18} /></div>
+                           <div className="flex-1">
+                               <h4 className="text-sm font-bold text-indigo-900 mb-1">AI 诊断结论</h4>
+                               <p className="text-xs text-indigo-800 leading-relaxed mb-3">{anomalyResult.summary}</p>
+                               {anomalyResult.anomalies?.length > 0 && (
+                                   <div className="flex flex-wrap gap-2">
+                                       {anomalyResult.anomalies.map((a:any, i:number) => (
+                                           <span key={i} className="px-2 py-1 bg-white border border-indigo-100 rounded text-[10px] text-indigo-600 font-medium">
+                                               {a.period}: {a.description}
+                                           </span>
+                                       ))}
+                                   </div>
+                               )}
+                           </div>
+                           <button onClick={() => setAnomalyResult(null)} className="text-indigo-300 hover:text-indigo-500"><X size={14} /></button>
+                       </div>
+                   </div>
+                )}
 
                 <div className="h-[320px] w-full">
                     <ResponsiveContainer width="100%" height="100%">

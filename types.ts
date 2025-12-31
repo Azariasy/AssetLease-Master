@@ -53,12 +53,21 @@ export interface LedgerRow {
   
   subjectCode: string;     
   subjectName: string;     
-  department?: string;     
+  department?: string;     // Department Code
+  departmentName?: string; // Department Name (New)
+
+  // New Dimensions
+  projectCode?: string;
+  projectName?: string;
+  subAccountCode?: string;
+  subAccountName?: string;
 
   debitAmount: number;    
   creditAmount: number;   
 
   counterparty?: string;   
+  counterpartyCode?: string; // New: Separated Code
+  counterpartyName?: string; // New: Separated Name
   rawReference?: string;   
 }
 
@@ -73,9 +82,21 @@ export interface BalanceRow {
   subjectName: string;   
   
   accountElement?: string; 
-  costCenter?: string;     
+  
+  // Dimensions - Extended
+  costCenter?: string;     // Usually Name
   costCenterCode?: string; 
-  counterparty?: string;   
+  costCenterName?: string;
+  
+  counterparty?: string;   // Usually combined or Name
+  counterpartyCode?: string;
+  counterpartyName?: string;
+
+  projectCode?: string;
+  projectName?: string;
+  
+  subAccountCode?: string;
+  subAccountName?: string;
 
   // Monthly / Period amounts (当期发生)
   openingBalance: number; 
@@ -89,6 +110,9 @@ export interface BalanceRow {
   ytdCredit?: number;     // 本年贷方累计
   lastYearDebit?: number; // 上年同期借方 (累计/余额)
   lastYearCredit?: number; // 上年同期贷方 (累计/余额)
+  
+  // New: 上年同期期末余额
+  lastYearClosingBalance?: number; 
 }
 
 // Aliases for FinancePage compatibility

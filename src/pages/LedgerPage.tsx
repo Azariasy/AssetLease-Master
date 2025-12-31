@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { LedgerRow, SystemConfig, Company } from '../types';
 import { Search, Filter, Download, X, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, FileText, ArrowRightLeft, Sparkles, Loader2, MessageSquare } from 'lucide-react';
@@ -24,6 +25,8 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
     period: sessionStorage.getItem(storagePrefix + 'period') || '',
     subjectCode: sessionStorage.getItem(storagePrefix + 'subject') || '',
     keyword: sessionStorage.getItem(storagePrefix + 'keyword') || '',
+    // Hidden filter state driven by AI
+    category: '', // 'income' | 'cost'
   });
 
   // Debounced Filter for Performance
@@ -44,6 +47,7 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
         period: sessionStorage.getItem(storagePrefix + 'period') || '',
         subjectCode: sessionStorage.getItem(storagePrefix + 'subject') || '',
         keyword: sessionStorage.getItem(storagePrefix + 'keyword') || '',
+        category: ''
       });
       setSelectedVoucherNo(null);
       setAiResponse('');
@@ -69,7 +73,7 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
   // Reset page when filter changes
   useEffect(() => {
     setCurrentPage(1);
-  }, [filter.period, debouncedSubject, debouncedKeyword]);
+  }, [filter.period, debouncedSubject, debouncedKeyword, filter.category]);
 
   const periods = Array.from(new Set(data.map(r => r.period))).sort().reverse();
   const normalize = (str: string) => str ? String(str).replace(/[\s\.]/g, '').toLowerCase() : '';
@@ -77,11 +81,27 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
   // Use Debounced values for Heavy Filtering
   const filteredRows = useMemo(() => {
     return data.filter(row => {
-      const matchPeriod = filter.period ? row.period === filter.period : true;
-      const matchCode = debouncedSubject 
-        ? normalize(row.subjectCode).includes(normalize(debouncedSubject)) 
+      // 1. Period Matching (Enhanced for partial year match)
+      // If filter.period is "2025", it matches "2025-01", "2025-02"
+      const matchPeriod = filter.period 
+        ? row.period === filter.period || row.period.startsWith(filter.period) 
         : true;
+      
+      // 2. Subject Code Matching
+      let matchCode = true;
+      if (debouncedSubject) {
+          matchCode = normalize(row.subjectCode).includes(normalize(debouncedSubject));
+      }
+      
+      // 3. AI Category Filter (Income/Cost)
+      let matchCategory = true;
+      if (filter.category === 'income') {
+          matchCategory = config.incomeSubjectCodes.some(c => row.subjectCode.startsWith(c));
+      } else if (filter.category === 'cost') {
+          matchCategory = config.costSubjectCodes.some(c => row.subjectCode.startsWith(c));
+      }
 
+      // 4. Keyword Matching
       let matchKey = true;
       if (debouncedKeyword) {
         const terms = debouncedKeyword.toLowerCase().split(' ').filter(t => t);
@@ -93,9 +113,9 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
         const isAmountSearch = /^\d+(\.\d+)?$/.test(debouncedKeyword) && amountStr.includes(debouncedKeyword);
         matchKey = terms.every(term => searchableText.includes(term)) || isAmountSearch;
       }
-      return matchPeriod && matchCode && matchKey;
+      return matchPeriod && matchCode && matchKey && matchCategory;
     });
-  }, [data, filter.period, debouncedSubject, debouncedKeyword, config.departmentMap]);
+  }, [data, filter.period, debouncedSubject, debouncedKeyword, filter.category, config]);
 
   const totalDebit = useMemo(() => filteredRows.reduce((sum, r) => sum + r.debitAmount, 0), [filteredRows]);
   const totalCredit = useMemo(() => filteredRows.reduce((sum, r) => sum + r.creditAmount, 0), [filteredRows]);
@@ -131,7 +151,8 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
       setFilter({
           period: '',
           subjectCode: '',
-          keyword: ''
+          keyword: '',
+          category: ''
       });
   };
 
@@ -145,22 +166,28 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
           // 1. Get current valid periods to help AI map relative dates (e.g. "12月")
           const validPeriods = Array.from(new Set(data.map(r => String(r.period)))).sort();
           
-          // 2. Parse Query
-          const result = await parseNaturalLanguageQuery(nlqInput, validPeriods);
+          // 2. Parse Query with System Config Context
+          const result = await parseNaturalLanguageQuery(nlqInput, validPeriods, config);
           
           // 3. Update Filter (This triggers table update via state)
           const newFilter = {
               period: result.period || '',
               subjectCode: result.subjectCode || '',
-              keyword: result.keyword || ''
+              keyword: result.keyword || '',
+              category: result.category || ''
           };
           setFilter(newFilter);
 
-          // 4. Calculate stats for the AI response (simulate filtering logic)
-          // We do this manually here because the state update hasn't propagated to filteredRows yet
+          // 4. Calculate stats for the AI response (simulate filtering logic immediately for response)
+          // We assume the filter logic mirrors the useMemo one
           const tempFiltered = data.filter(row => {
-              const matchPeriod = newFilter.period ? row.period === newFilter.period : true;
+              const matchPeriod = newFilter.period ? row.period === newFilter.period || row.period.startsWith(newFilter.period) : true;
               const matchCode = newFilter.subjectCode ? normalize(row.subjectCode).includes(normalize(newFilter.subjectCode)) : true;
+              
+              let matchCategory = true;
+              if (newFilter.category === 'income') matchCategory = config.incomeSubjectCodes.some(c => row.subjectCode.startsWith(c));
+              else if (newFilter.category === 'cost') matchCategory = config.costSubjectCodes.some(c => row.subjectCode.startsWith(c));
+
               let matchKey = true;
               if (newFilter.keyword) {
                   const terms = newFilter.keyword.toLowerCase().split(' ').filter(t => t);
@@ -169,10 +196,10 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
                   const amountStr = Math.abs(row.debitAmount || row.creditAmount).toString();
                   matchKey = terms.every(term => searchableText.includes(term)) || amountStr.includes(newFilter.keyword);
               }
-              return matchPeriod && matchCode && matchKey;
+              return matchPeriod && matchCode && matchKey && matchCategory;
           });
 
-          // 5. Generate Conversational Response
+          // 5. Generate Conversational Response with Context
           const stats = {
               count: tempFiltered.length,
               totalDebit: tempFiltered.reduce((sum, r) => sum + r.debitAmount, 0).toFixed(2),
@@ -180,7 +207,13 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
               summaries: Array.from(new Set(tempFiltered.map(r => r.summary).filter(Boolean))).slice(0, 3)
           };
           
-          const aiText = await generateNlqResponse(nlqInput, stats);
+          const aiContext = {
+              category: result.category, // 'income' | 'cost'
+              period: result.period,
+              isAggregation: result.isAggregation
+          };
+
+          const aiText = await generateNlqResponse(nlqInput, stats, aiContext);
           setAiResponse(aiText);
 
       } catch (e) {
@@ -218,13 +251,13 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
                     value={nlqInput}
                     onChange={(e) => setNlqInput(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && handleNlqSearch()}
-                    placeholder="试试 AI 搜索：'查一下世纪源通12月的账务'..."
+                    placeholder="试试 AI 搜索：'查一下2025年的收入' 或 '研发部的差旅费'..."
                     className="flex-1 outline-none text-sm font-bold text-slate-700 placeholder:font-normal placeholder:text-slate-400"
                     disabled={isNlqLoading}
                 />
                 
                 {/* Close Button (Only show if input is not empty OR filter is active) */}
-                {(nlqInput || filter.period || filter.keyword || filter.subjectCode) && (
+                {(nlqInput || filter.period || filter.keyword || filter.subjectCode || filter.category) && (
                     <button 
                         onClick={handleClearAI} 
                         className="p-1 rounded-full text-slate-300 hover:text-slate-500 hover:bg-slate-100 transition-colors"
@@ -247,7 +280,7 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
               {aiResponse && (
                   <div className="mt-3 mx-1 p-3 bg-indigo-50/50 rounded-xl border border-indigo-100 flex items-start gap-3 animate-in fade-in slide-in-from-top-2">
                       <MessageSquare size={16} className="text-indigo-500 mt-0.5 shrink-0" />
-                      <p className="text-sm text-indigo-900">{aiResponse}</p>
+                      <p className="text-sm text-indigo-900 font-medium">{aiResponse}</p>
                   </div>
               )}
           </div>
@@ -301,11 +334,16 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
           </button>
         </div>
 
-        {(filter.subjectCode || filter.period) && (
+        {(filter.subjectCode || filter.period || filter.category) && (
           <div className="flex items-center gap-2 text-xs text-slate-500 pt-2 border-t border-slate-100">
             <Filter size={12} />
             <span>当前筛选条件:</span>
             {filter.period && <span className="px-2 py-0.5 bg-blue-50 text-blue-600 rounded">期间: {filter.period}</span>}
+            {filter.category && (
+                <span className={`px-2 py-0.5 rounded ${filter.category === 'income' ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
+                    类别: {filter.category === 'income' ? '收入类' : '成本费用类'}
+                </span>
+            )}
             {filter.subjectCode && <span className="px-2 py-0.5 bg-indigo-50 text-indigo-600 rounded">科目包含: {filter.subjectCode}</span>}
           </div>
         )}

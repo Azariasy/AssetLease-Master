@@ -1,39 +1,112 @@
 
-import { AnalysisResult } from '../types';
+import { AnalysisResult, SystemConfig } from '../types';
 
 // 配置通义千问 (DashScope) 的 API 端点
 // 使用兼容 OpenAI 的接口格式
 const BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
 
-// Helper to get API Key from localStorage (set in App.tsx)
-const getApiKey = () => localStorage.getItem('DASHSCOPE_API_KEY') || '';
+// Helper to get API Key from localStorage (set in App.tsx) or env
+const getApiKey = () => {
+  return localStorage.getItem('DASHSCOPE_API_KEY') || 
+         (window as any).DASHSCOPE_API_KEY || 
+         ''; 
+};
 
 // Helper function to call Qwen API
-const callQwenAPI = async (messages: any[], model: string = "qwen-plus") => {
+const callQwenAPI = async (messages: any[], model: string = "qwen-plus", jsonMode: boolean = false) => {
   const apiKey = getApiKey();
-  if (!apiKey) throw new Error("缺少通义千问 API Key");
+  // Don't throw immediately, let the caller handle the fallback if key is missing
+  if (!apiKey) throw new Error("Missing API Key");
 
-  const response = await fetch(BASE_URL, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: model,
-      messages: messages,
-      response_format: { type: "json_object" } // Force JSON output where possible
-    })
-  });
+  const body: any = {
+    model: model,
+    messages: messages,
+  };
 
-  if (!response.ok) {
-    const err = await response.json();
-    throw new Error(err.message || "DashScope API request failed");
+  if (jsonMode) {
+    body.response_format = { type: "json_object" };
   }
 
-  const data = await response.json();
-  return data.choices[0].message.content;
+  try {
+    const response = await fetch(BASE_URL, {
+        method: "POST",
+        headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.message || "DashScope API request failed");
+    }
+
+    const data = await response.json();
+    return data.choices[0].message.content;
+  } catch (err) {
+      throw err;
+  }
 };
+
+// --- Local Fallback Logic (Rule-based) ---
+const localNlqFallback = (query: string, validPeriods: string[]) => {
+  let period = '';
+  let category: 'income' | 'cost' | null = null;
+  let keyword = query;
+  let isAggregation = false;
+
+  // 1. Extract Period (Year) - e.g., 2025, 2024
+  const yearMatch = keyword.match(/(20\d{2})/);
+  if (yearMatch) {
+      period = yearMatch[1];
+      // If validPeriods contains this year, finding the exact match is handled by filter, 
+      // but here we just extracting the string "2025"
+      keyword = keyword.replace(yearMatch[0], '').replace('年', '');
+  }
+
+  // 2. Extract Month - e.g., 12月, 1月
+  const monthMatch = keyword.match(/(\d{1,2})月/);
+  if (monthMatch) {
+      const m = monthMatch[1].padStart(2, '0');
+      // Attempt to construct YYYY-MM if we already have a year
+      if (period.length === 4) {
+          period = `${period}-${m}`;
+      } else {
+          // Try to find the most recent matching period from validPeriods
+          const match = validPeriods.find(p => p.endsWith(`-${m}`));
+          if (match) period = match;
+      }
+      keyword = keyword.replace(monthMatch[0], '');
+  }
+
+  // 3. Extract Category
+  if (/收入|营收|收益|赚|进账/.test(keyword)) {
+      category = 'income';
+      keyword = keyword.replace(/收入|营收|收益|赚|进账/g, '');
+  } else if (/成本|费用|支出|花销|开支|付款/.test(keyword)) {
+      category = 'cost';
+      keyword = keyword.replace(/成本|费用|支出|花销|开支|付款/g, '');
+  }
+
+  // 4. Aggregation intent
+  if (/多少|合计|总额|总共|统计/.test(keyword)) {
+      isAggregation = true;
+      keyword = keyword.replace(/多少|合计|总额|总共|统计|钱|金额/g, '');
+  }
+
+  // 5. Cleanup keyword (Remove stop words and particles)
+  // This is crucial to prevent "在" or "有哪些" from becoming the search keyword which yields 0 results.
+  keyword = keyword
+    .replace(/查一下|查询|看看|搜索|有没有|有哪些|的|是|在|或者|和|与/g, ' ')
+    .trim();
+
+  // 6. Handle Company Names specifically if recognized structure
+  // (Simple heuristic: if keyword is still long, it might be a company name)
+  
+  return { period, category, subjectCode: '', keyword, isAggregation };
+};
+
 
 // AI 智能对账分析 (通用/合同类 - FinancePage 使用)
 export const analyzeReconciliation = async (
@@ -66,16 +139,16 @@ export const analyzeReconciliation = async (
     const content = await callQwenAPI([
       { role: "system", content: "你是一个专业的财务助手，请始终以纯 JSON 格式回复。" },
       { role: "user", content: prompt }
-    ], "qwen-plus");
+    ], "qwen-plus", true);
 
     const jsonStr = content.replace(/```json\n?|```/g, '').trim();
     return JSON.parse(jsonStr);
   } catch (error) {
     console.error("AI Analysis Failed:", error);
     return {
-      summary: "AI 分析服务暂时不可用。",
+      summary: "AI 分析服务暂时不可用（API Key 未配置或网络错误）。",
       risks: [],
-      recommendations: ["请检查网络连接"],
+      recommendations: ["请检查网络连接", "请在设置页配置 API Key"],
       kpiIndicators: []
     };
   }
@@ -110,7 +183,7 @@ export const analyzeInterCompanyRecon = async (
     const content = await callQwenAPI([
       { role: "system", content: "你是一个资深的集团财务审计师。请以 JSON 格式回复。" },
       { role: "user", content: prompt }
-    ], "qwen-plus"); 
+    ], "qwen-plus", true); 
 
     const jsonStr = content.replace(/```json\n?|```/g, '').trim();
     return JSON.parse(jsonStr);
@@ -164,7 +237,7 @@ export const smartVoucherMatch = async (
     const content = await callQwenAPI([
       { role: "system", content: "你是一个精通审计的AI助手，擅长发现凭证之间的勾稽关系。" },
       { role: "user", content: prompt }
-    ], "qwen-plus");
+    ], "qwen-plus", true);
 
     const jsonStr = content.replace(/```json\n?|```/g, '').trim();
     return JSON.parse(jsonStr);
@@ -214,7 +287,7 @@ export const detectFinancialAnomalies = async (
     const content = await callQwenAPI([
       { role: "system", content: "你是一个敏锐的财务数据分析师。请以 JSON 格式回复。" },
       { role: "user", content: prompt }
-    ], "qwen-plus");
+    ], "qwen-plus", true);
 
     const jsonStr = content.replace(/```json\n?|```/g, '').trim();
     return JSON.parse(jsonStr);
@@ -256,7 +329,8 @@ export const extractContractData = async (base64Content: string, mimeType: strin
       }
     ];
 
-    const content = await callQwenAPI(messages, "qwen-vl-max");
+    // Vision model does not support response_format parameter usually, or we default it to false/auto
+    const content = await callQwenAPI(messages, "qwen-vl-max", false);
     const jsonStr = content.replace(/```json\n?|```/g, '').trim();
     return JSON.parse(jsonStr);
 
@@ -266,81 +340,107 @@ export const extractContractData = async (base64Content: string, mimeType: strin
   }
 };
 
-// NEW: 自然语言查询解析 (LedgerPage NLQ Search)
-export const parseNaturalLanguageQuery = async (query: string, validPeriods: string[] = []) => {
+// NEW: 自然语言查询解析 (LedgerPage NLQ Search) - 增强版 v4.1
+export const parseNaturalLanguageQuery = async (query: string, validPeriods: string[], config: SystemConfig) => {
   const prompt = `
     任务：将用户的自然语言查询解析为财务流水账的筛选条件。
     
     查询内容: "${query}"
     
-    系统当前存在的会计期间 (Valid Periods): ${JSON.stringify(validPeriods)}
+    【上下文信息】:
+    1. 系统当前存在的会计期间: ${JSON.stringify(validPeriods)}
+    2. 收入类科目规则: 代码以 ${JSON.stringify(config.incomeSubjectCodes)} 开头。
+    3. 成本/费用类科目规则: 代码以 ${JSON.stringify(config.costSubjectCodes)} 开头。
     
-    请提取以下字段（JSON格式）：
-    - period: 会计期间 (YYYY-MM)。
-      规则：如果用户提到月份（如“12月”），必须优先在 Valid Periods 中寻找匹配的年份（如 '2024-12'）。
-      如果用户没有提到时间，返回空字符串。
-    - subjectCode: 科目代码 (纯数字)。如果提到具体科目但无代码，可留空。
-    - keyword: 搜索关键词。用于匹配摘要、往来单位、金额等。请提取公司名、业务名等核心词。
+    【解析规则】:
+    1. **Period (会计期间)**: 
+       - 如果用户说 "2025年" 或 "今年"，请提取为 "2025" (fuzzy match)。
+       - 如果说 "12月" 且上下文有 2024-12，则提取 "2024-12"。
+       - 如果未提及，留空。
+    2. **Category (科目类别)**:
+       - 如果用户问 "收入"、"营收"、"赚钱"，返回 "income"。
+       - 如果用户问 "成本"、"费用"、"支出"、"花销"，返回 "cost"。
+       - 否则返回 null。
+    3. **SubjectCode (具体科目)**: 
+       - 如果用户提到具体数字代码 (如 5502)，提取它。
+    4. **Keyword (关键词)**: 
+       - 提取核心搜索词（如往来单位名称、部门名称、摘要内容）。
+       - **重要**: 请务必**排除**询问词（如“有多少”、“查一下”、“有哪些”）和时间/类别词，只保留实体名称或业务关键词。
+       - 示例："查询成都移动2025年的收入" -> Keyword: "成都移动" (排除"查询","2025","收入")。
+    5. **Aggregation (意图)**:
+       - 如果用户是在问 "多少钱"、"总额"、"合计"，设置 isAggregation=true。
 
-    示例 1：
-    Valid Periods: ["2023-12", "2024-01"]
-    用户: "查一下12月的研发费用"
-    返回: { "period": "2023-12", "subjectCode": "", "keyword": "研发费用" }
-
-    示例 2：
-    Valid Periods: ["2024-11", "2024-12"]
-    用户: "成都燃气公司的往来账"
-    返回: { "period": "", "subjectCode": "", "keyword": "成都燃气" }
+    请返回 JSON:
+    {
+      "period": "string", 
+      "category": "income" | "cost" | null,
+      "subjectCode": "string",
+      "keyword": "string",
+      "isAggregation": boolean
+    }
   `;
 
   try {
     const content = await callQwenAPI([
-      { role: "system", content: "你是一个精确的语义解析助手，只返回 JSON。" },
+      { role: "system", content: "你是一个精确的财务语义解析助手，只返回 JSON。" },
       { role: "user", content: prompt }
-    ], "qwen-plus");
+    ], "qwen-plus", true);
 
     const jsonStr = content.replace(/```json\n?|```/g, '').trim();
     const result = JSON.parse(jsonStr);
     return {
         period: result.period || '',
+        category: result.category || null,
         subjectCode: result.subjectCode || '',
-        keyword: result.keyword || ''
+        keyword: result.keyword || '',
+        isAggregation: result.isAggregation || false
     };
   } catch (error) {
-    console.error("NLQ Failed:", error);
-    // Fallback
-    return { period: '', subjectCode: '', keyword: query };
+    console.warn("NLQ API Failed, using local fallback rule-based parser.", error);
+    // Use the robust local fallback instead of returning raw query as keyword
+    return localNlqFallback(query, validPeriods);
   }
 };
 
-// NEW: 生成自然语言回复
-export const generateNlqResponse = async (query: string, stats: any) => {
+// NEW: 生成自然语言回复 - 增强版 v4.1 (支持回答具体数值)
+export const generateNlqResponse = async (query: string, stats: any, context?: any) => {
   const prompt = `
-    任务：根据用户查询和系统查到的财务数据统计，生成一句简洁、友好的回答。
+    任务：根据用户查询和系统查到的财务数据，生成一句专业、准确的回答。
     
     用户问题: "${query}"
-    查得数据统计: ${JSON.stringify(stats)}
     
-    字段说明：
-    - count: 记录条数
-    - totalDebit: 借方合计
-    - totalCredit: 贷方合计
-    - summaries: 主要的摘要内容（前几条）
-
-    要求：
-    1. 直接回答结果。例如：“找到了 3 笔相关记录，主要是支付燃气费，合计 2000 元。”
-    2. 如果没查到（count=0），请礼貌告知。
-    3. 不要返回 JSON，只返回文本字符串。
+    【查得数据统计】:
+    - 记录条数: ${stats.count}
+    - 借方合计: ${stats.totalDebit}
+    - 贷方合计: ${stats.totalCredit}
+    - 摘要示例: ${JSON.stringify(stats.summaries)}
+    
+    【上下文判断】:
+    - 查询类别: ${context?.category || '通用搜索'}
+    - 涉及期间: ${context?.period || '全部'}
+    
+    【回答要求】:
+    1. 如果用户问的是"收入" (Income)，请重点回答**贷方合计**金额。
+    2. 如果用户问的是"成本/费用" (Cost)，请重点回答**借方合计**金额。
+    3. 如果是通用查询，简述借贷情况。
+    4. 如果没有数据 (count=0)，请礼貌告知。
+    5. **直接回答数字**，不要只说"找到了记录"。例如："2025年共产生收入 1,200,000 元。"
+    6. 只返回文本字符串，不要 JSON。
   `;
 
   try {
+    // Pass false to disable JSON mode, as we want plain text response
     const content = await callQwenAPI([
-      { role: "system", content: "你是一个乐于助人的财务机器人。" },
+      { role: "system", content: "你是一个乐于助人的财务机器人，说话简练、专业。" },
       { role: "user", content: prompt }
-    ], "qwen-plus");
+    ], "qwen-plus", false);
 
-    return content.replace(/['"]/g, ''); // Simple cleanup
+    return content.replace(/['"]/g, ''); 
   } catch (error) {
-    return `查询完成，共找到 ${stats.count} 条记录。`;
+    // If text generation fails, return a template response
+    let msg = `查询完成，共找到 ${stats.count} 条记录。`;
+    if (context?.category === 'income') msg += ` 贷方合计: ${stats.totalCredit}`;
+    else if (context?.category === 'cost') msg += ` 借方合计: ${stats.totalDebit}`;
+    return msg;
   }
 };

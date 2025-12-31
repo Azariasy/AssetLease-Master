@@ -1,35 +1,57 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
-import { LedgerRow, SystemConfig } from '../types';
+import { LedgerRow, SystemConfig, Company } from '../types';
 import { Search, Filter, Download, X, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Building2 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 
 interface LedgerPageProps {
   data: LedgerRow[];
   initialFilter?: { subjectCode?: string, period?: string } | null;
   config: SystemConfig;
+  currentEntity?: Company;
 }
 
 const ITEMS_PER_PAGE = 50;
 
-const LedgerPage = ({ data, initialFilter, config }: LedgerPageProps) => {
+const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, currentEntity }) => {
+  const storagePrefix = currentEntity ? `led_${currentEntity.id}_` : 'led_';
+
   const [filter, setFilter] = useState({
-    period: '',
-    subjectCode: '',
-    keyword: '',
+    period: sessionStorage.getItem(storagePrefix + 'period') || '',
+    subjectCode: sessionStorage.getItem(storagePrefix + 'subject') || '',
+    keyword: sessionStorage.getItem(storagePrefix + 'keyword') || '',
   });
 
   const [currentPage, setCurrentPage] = useState(1);
 
-  // Apply initial filters if provided
+  // Handle Entity Switch - Reload filters
+  useEffect(() => {
+      setFilter({
+        period: sessionStorage.getItem(storagePrefix + 'period') || '',
+        subjectCode: sessionStorage.getItem(storagePrefix + 'subject') || '',
+        keyword: sessionStorage.getItem(storagePrefix + 'keyword') || '',
+      });
+  }, [storagePrefix]);
+
+  // Apply initial filters if provided (from Dashboard Drilldown), override session
   useEffect(() => {
     if (initialFilter) {
-      setFilter(prev => ({
-        ...prev,
-        period: initialFilter.period || '',
-        subjectCode: initialFilter.subjectCode || ''
-      }));
+      setFilter(prev => {
+          const newState = {
+            ...prev,
+            period: initialFilter.period || prev.period,
+            subjectCode: initialFilter.subjectCode || prev.subjectCode
+          };
+          return newState;
+      });
     }
   }, [initialFilter]);
+
+  // Save to Session Storage on change
+  useEffect(() => {
+      sessionStorage.setItem(storagePrefix + 'period', filter.period);
+      sessionStorage.setItem(storagePrefix + 'subject', filter.subjectCode);
+      sessionStorage.setItem(storagePrefix + 'keyword', filter.keyword);
+  }, [filter, storagePrefix]);
 
   // Reset to page 1 when filter changes
   useEffect(() => {
@@ -75,6 +97,28 @@ const LedgerPage = ({ data, initialFilter, config }: LedgerPageProps) => {
     (currentPage - 1) * ITEMS_PER_PAGE,
     currentPage * ITEMS_PER_PAGE
   );
+
+  const handleExport = () => {
+    if (filteredRows.length === 0) return;
+    
+    const exportData = filteredRows.map(r => ({
+        '期间': r.period,
+        '日期': r.date,
+        '凭证号': r.voucherNo,
+        '科目编码': r.subjectCode,
+        '科目名称': r.subjectName,
+        '借方金额': r.debitAmount,
+        '贷方金额': r.creditAmount,
+        '摘要': r.summary,
+        '部门': config.departmentMap[r.department || ''] || r.department || '',
+        '往来单位': r.counterparty || ''
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(exportData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "明细账");
+    XLSX.writeFile(workbook, `明细账_${filter.period || '全部'}_${new Date().getTime()}.xlsx`);
+  };
 
   const getDeptDisplay = (code?: string) => {
     if (!code) return '-';
@@ -150,7 +194,10 @@ const LedgerPage = ({ data, initialFilter, config }: LedgerPageProps) => {
               </div>
           </div>
 
-          <button className="flex-shrink-0 flex items-center gap-2 px-4 h-9 text-slate-600 font-bold bg-slate-100 hover:bg-slate-200 rounded-lg transition text-sm w-fit ml-auto xl:ml-0">
+          <button 
+            onClick={handleExport}
+            className="flex-shrink-0 flex items-center gap-2 px-4 h-9 text-slate-600 font-bold bg-slate-100 hover:bg-slate-200 rounded-lg transition text-sm w-fit ml-auto xl:ml-0"
+          >
             <Download size={16} />
             导出 Excel
           </button>
@@ -230,6 +277,11 @@ const LedgerPage = ({ data, initialFilter, config }: LedgerPageProps) => {
                   </td>
                 </tr>
               ))}
+              {paginatedRows.length === 0 && (
+                <tr>
+                    <td colSpan={7} className="px-4 py-20 text-center text-slate-400 italic">未查询到符合条件的明细记录</td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

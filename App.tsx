@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   LayoutDashboard, TableProperties, ListFilter, Import, Settings, 
-  Search, Bell, ChevronRight, Building2, RefreshCw
+  Search, Bell, ChevronRight, Building2, RefreshCw, KeyRound, Check
 } from 'lucide-react';
 import { db } from './db';
 
@@ -22,27 +22,56 @@ const DEFAULT_COMPANIES: Company[] = [
     id: 'ent_listed', 
     name: '中移（成都）信息通信科技有限公司', 
     type: 'listed', 
-    matchedNameInOtherBooks: '成研院' // 非上市账套里，往来单位通常叫“成研院”
+    matchedNameInOtherBooks: '成研院',
+    segmentPrefix: '391310' // 上市公司段
   },
   { 
     id: 'ent_non_listed', 
     name: '中国移动通信集团有限公司成都产业研究院分公司', 
     type: 'non-listed', 
-    matchedNameInOtherBooks: '成研分公司' // 上市账套里，往来单位通常叫“成研分公司”
+    matchedNameInOtherBooks: '成研分公司',
+    segmentPrefix: '012610' // 非上市公司段
   }
 ];
 
 const DEFAULT_CONFIG: SystemConfig = {
   mappingTemplates: [],
-  incomeSubjectCodes: ['6001', '6051', '5001', '5051'], // 扩充常见收入科目
-  costSubjectCodes: ['6401', '6402', '6403', '6601', '6602', '5401'], // 扩充常见成本科目
+  // Updated Income Codes based on user provided real data (Class 5 Income)
+  incomeSubjectCodes: ['5111', '5121', '5141', '5171', '5201', '5301'],
+  // Updated Cost/Expense Codes based on user provided real data (Class 5 Costs)
+  costSubjectCodes: ['5410', '5411', '5421', '5471', '5481', '5501', '5502', '5503', '5504', '5601', '5603'],
   accountSegmentIndex: 4,
   subAccountSegmentIndex: 5,
+  // 真实部门数据映射 (Key: 6位部门段代码, Value: 通用部门名称)
   departmentMap: {
-    "01": "综合部",
-    "02": "财务部",
-    "03": "市场部",
-    "04": "研发一部"
+    "260003": "财务部",
+    "260020": "西南区域中心",
+    "260021": "北方区域中心",
+    "260023": "华东区域中心",
+    "260024": "华南区域中心",
+    "260025": "华中区域中心",
+    "260026": "西北区域中心",
+    "260030": "农商文旅产品中心",
+    "260011": "产业合作部",
+    "260015": "北京分公司",
+    "260013": "研发二部",
+    "260005": "技术支撑中心",
+    "260032": "教育产品中心",
+    "260001": "综合部（法律事务部）",
+    "260027": "教育产品一中心",
+    "260016": "市场部（品质管理部）",
+    "260009": "技术规划部",
+    "260018": "工会",
+    "260022": "纪委办公室（内审部）",
+    "260029": "医疗产品中心",
+    "260031": "低空经济技术研发运营中心",
+    "260006": "研发一部",
+    "260004": "行业应用中心",
+    "260002": "人力资源部",
+    "260014": "公司领导",
+    "260017": "技术专家",
+    "260008": "党委办公室（党群工作部/党风廉政办公室）",
+    "260028": "教育产品二中心"
   },
   entities: DEFAULT_COMPANIES
 };
@@ -50,22 +79,65 @@ const DEFAULT_CONFIG: SystemConfig = {
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [isLoading, setIsLoading] = useState(false);
-  
-  // Global State - Initialize from localStorage
-  const [currentEntityId, setCurrentEntityId] = useState<string>(() => {
-     return localStorage.getItem('last_entity_id') || DEFAULT_COMPANIES[0].id;
-  });
+  const [apiKey, setApiKey] = useState<string>('');
+  const [hasApiKey, setHasApiKey] = useState(false);
 
+  // Check API Key on load (Non-blocking now)
+  useEffect(() => {
+    const storedKey = localStorage.getItem('DASHSCOPE_API_KEY');
+    if (storedKey && storedKey.length > 10) {
+      setApiKey(storedKey);
+      setHasApiKey(true);
+    }
+  }, [activeTab]); // Re-check when tab changes (e.g. returning from Settings)
+
+  // 1. Initialize Configuration from LocalStorage
   const [config, setConfig] = useState<SystemConfig>(() => {
     const saved = localStorage.getItem('sys_config');
-    // Simple migration: if saved config doesn't have the new specific names, use default
     if (saved) {
         const parsed = JSON.parse(saved);
-        if (parsed.entities && parsed.entities.some((e:any) => e.name.includes('中移'))) {
-            return parsed;
+        // Migration: If using old standard codes (6001), update to new custom codes (5111) from DEFAULT_CONFIG
+        if (parsed.incomeSubjectCodes && parsed.incomeSubjectCodes.includes('6001')) {
+             parsed.incomeSubjectCodes = DEFAULT_CONFIG.incomeSubjectCodes;
+             parsed.costSubjectCodes = DEFAULT_CONFIG.costSubjectCodes;
         }
+        
+        // Merge with default map if specific keys are missing to ensure user has the latest dictionary
+        if (!parsed.departmentMap["260003"]) {
+            parsed.departmentMap = { ...parsed.departmentMap, ...DEFAULT_CONFIG.departmentMap };
+        }
+        
+        // Ensure entity structure is up to date WITHOUT overwriting IDs
+        // Iterate through defaults and patch missing fields in saved entities if ID matches
+        const patchedEntities = parsed.entities.map((savedEnt: any) => {
+            const defaultEnt = DEFAULT_COMPANIES.find(d => d.id === savedEnt.id);
+            if (defaultEnt) {
+                return { ...savedEnt, segmentPrefix: savedEnt.segmentPrefix || defaultEnt.segmentPrefix };
+            }
+            return savedEnt;
+        });
+        
+        // If critical default entities are missing entirely, append them
+        DEFAULT_COMPANIES.forEach(def => {
+            if (!patchedEntities.some((e: any) => e.id === def.id)) {
+                patchedEntities.push(def);
+            }
+        });
+        
+        parsed.entities = patchedEntities;
+        return parsed;
     }
     return DEFAULT_CONFIG;
+  });
+
+  // 2. Initialize Entity ID *AFTER* Config is ready
+  const [currentEntityId, setCurrentEntityId] = useState<string>(() => {
+     const savedId = localStorage.getItem('last_entity_id');
+     // Validate if saved ID exists in the loaded config
+     if (savedId && config.entities.some(e => e.id === savedId)) {
+         return savedId;
+     }
+     return config.entities[0].id;
   });
   
   // Data State (Loaded from DB)
@@ -130,9 +202,12 @@ const App: React.FC = () => {
       return <div className="flex h-full items-center justify-center text-slate-400">正在从本地数据库加载数据...</div>;
     }
 
+    // Adding key={currentEntityId} forces React to destroy and recreate the component when entity changes.
+    // This effectively resets internal state (like filters in BalancePage/LedgerPage) automatically.
     switch (activeTab) {
       case 'dashboard':
         return <DashboardPage 
+            key={currentEntityId}
             currentEntity={currentEntity} 
             allEntities={config.entities}
             balances={balanceData} 
@@ -141,17 +216,23 @@ const App: React.FC = () => {
         />;
       case 'balances':
         return <BalancePage 
+          key={currentEntityId}
           balances={balanceData} 
-          onDrillDown={(code, period) => handleNavigate('ledger', { subjectCode: code, period })} 
+          onDrillDown={(code, period) => handleNavigate('ledger', { subjectCode: code, period })}
+          config={config}
+          currentEntity={currentEntity} 
         />;
       case 'ledger':
         return <LedgerPage 
+          key={currentEntityId}
           data={ledgerData} 
           initialFilter={drillDownFilter}
           config={config}
+          currentEntity={currentEntity}
         />;
       case 'import':
         return <ImportPage 
+          key={currentEntityId}
           currentEntity={currentEntity}
           onDataChanged={handleRefreshData}
           config={config}
@@ -160,7 +241,7 @@ const App: React.FC = () => {
       case 'settings':
         return <SettingsPage config={config} onSave={(newConfig) => setConfig(newConfig)} />; 
       default:
-        return <DashboardPage currentEntity={currentEntity} allEntities={config.entities} balances={balanceData} ledger={ledgerData} config={config} />;
+        return <DashboardPage key={currentEntityId} currentEntity={currentEntity} allEntities={config.entities} balances={balanceData} ledger={ledgerData} config={config} />;
     }
   };
 
@@ -184,8 +265,8 @@ const App: React.FC = () => {
             <span className="font-bold text-lg">G</span>
           </div>
           <div>
-            <h1 className="font-bold text-sm tracking-wide">Group Finance</h1>
-            <p className="text-[10px] text-slate-500 font-medium">集团财务数据中心 v3.1</p>
+            <h1 className="font-bold text-sm tracking-wide">Finance Master</h1>
+            <p className="text-[10px] text-slate-500 font-medium">集团财务数据中心 v3.7</p>
           </div>
         </div>
 
@@ -208,9 +289,14 @@ const App: React.FC = () => {
                <Building2 size={14} />
             </div>
           </div>
-          <div className="mt-2 px-2 flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full ${currentEntity.type === 'listed' ? 'bg-emerald-500' : 'bg-blue-500'}`}></span>
-            <span className="text-[10px] text-slate-400">{currentEntity.type === 'listed' ? '上市主体' : '非上市主体'}</span>
+          <div className="mt-2 px-2 flex items-center gap-2 justify-between">
+            <div className="flex items-center gap-2">
+                <span className={`w-2 h-2 rounded-full ${currentEntity.type === 'listed' ? 'bg-emerald-500' : 'bg-blue-500'}`}></span>
+                <span className="text-[10px] text-slate-400">{currentEntity.type === 'listed' ? '上市主体' : '非上市主体'}</span>
+            </div>
+            <span className="text-[9px] font-mono text-slate-600 bg-slate-800 px-1 rounded" title="公司段代码">
+              {currentEntity.segmentPrefix}
+            </span>
           </div>
         </div>
 
@@ -221,7 +307,7 @@ const App: React.FC = () => {
           <NavItem icon={<Import size={18} />} label="数据导入" active={activeTab === 'import'} onClick={() => handleNavigate('import')} />
           
           <div className="pt-6 pb-2 px-4 text-xs font-bold text-slate-600 uppercase tracking-wider">系统管理</div>
-          <NavItem icon={<Settings size={18} />} label="参数配置" active={activeTab === 'settings'} onClick={() => handleNavigate('settings')} />
+          <NavItem icon={<Settings size={18} />} label="系统参数" active={activeTab === 'settings'} onClick={() => handleNavigate('settings')} />
         </nav>
       </aside>
 
@@ -237,6 +323,19 @@ const App: React.FC = () => {
           </div>
           
           <div className="flex items-center gap-6">
+            {/* API Key Status Indicator */}
+            {hasApiKey ? (
+                <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-slate-100 rounded-full border border-slate-200" title="AI 引擎已就绪">
+                    <div className="w-2 h-2 rounded-full bg-emerald-500"></div>
+                    <span className="text-[10px] font-bold text-slate-500">AI Engine Ready</span>
+                </div>
+            ) : (
+                <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-red-50 rounded-full border border-red-100 cursor-pointer hover:bg-red-100" onClick={() => setActiveTab('settings')}>
+                    <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
+                    <span className="text-[10px] font-bold text-red-500">AI 未配置</span>
+                </div>
+            )}
+
             <div className="text-sm text-right hidden md:block">
                <p className="font-bold text-slate-800 max-w-[300px] truncate">{currentEntity.name}</p>
                <p className="text-xs text-slate-400">本地数据已同步</p>

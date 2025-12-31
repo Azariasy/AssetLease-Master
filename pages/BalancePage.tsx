@@ -1,29 +1,49 @@
-
 import React, { useState, useMemo, useEffect } from 'react';
-import { BalanceRow } from '../types';
-import { Search, Filter, ArrowRightCircle, Users, Building2, X, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, LayoutGrid } from 'lucide-react';
+import { BalanceRow, SystemConfig, Company } from '../types';
+import { Search, Filter, ArrowRightCircle, Users, Building2, X, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, LayoutGrid, Download } from 'lucide-react';
+import * as XLSX from 'xlsx';
 
 interface BalancePageProps {
   balances: BalanceRow[];
   onDrillDown: (subjectCode: string, period: string) => void;
+  config?: SystemConfig;
+  currentEntity?: Company;
 }
 
 const ITEMS_PER_PAGE = 50;
 
-const BalancePage = ({ balances, onDrillDown }: BalancePageProps) => {
-  // 1. State Definitions
-  const [period, setPeriod] = useState<string>('');
-  const [keyword, setKeyword] = useState('');
-  const [activeTab, setActiveTab] = useState<string>('全部');
+const BalancePage: React.FC<BalancePageProps> = ({ balances, onDrillDown, config, currentEntity }) => {
+  const storagePrefix = currentEntity ? `bal_${currentEntity.id}_` : 'bal_';
+
+  // 1. State Definitions (Load from SessionStorage if available)
+  const [period, setPeriod] = useState<string>(() => sessionStorage.getItem(storagePrefix + 'period') || '');
+  const [keyword, setKeyword] = useState(() => sessionStorage.getItem(storagePrefix + 'keyword') || '');
+  const [activeTab, setActiveTab] = useState<string>(() => sessionStorage.getItem(storagePrefix + 'tab') || '全部');
   
-  // Dimensions State: Controls aggregation
-  const [showDept, setShowDept] = useState(false);
-  const [showCounterparty, setShowCounterparty] = useState(false);
+  // Dimensions State
+  const [showDept, setShowDept] = useState(() => sessionStorage.getItem(storagePrefix + 'showDept') === 'true');
+  const [showCounterparty, setShowCounterparty] = useState(() => sessionStorage.getItem(storagePrefix + 'showCP') === 'true');
 
   // Pagination State
   const [currentPage, setCurrentPage] = useState(1);
 
-  // Initialize period
+  // Persist State Changes
+  useEffect(() => { sessionStorage.setItem(storagePrefix + 'period', period); }, [period, storagePrefix]);
+  useEffect(() => { sessionStorage.setItem(storagePrefix + 'keyword', keyword); }, [keyword, storagePrefix]);
+  useEffect(() => { sessionStorage.setItem(storagePrefix + 'tab', activeTab); }, [activeTab, storagePrefix]);
+  useEffect(() => { sessionStorage.setItem(storagePrefix + 'showDept', String(showDept)); }, [showDept, storagePrefix]);
+  useEffect(() => { sessionStorage.setItem(storagePrefix + 'showCP', String(showCounterparty)); }, [showCounterparty, storagePrefix]);
+
+  // Handle Entity Switch - Reset or Reload if prefix changes
+  useEffect(() => {
+      setPeriod(sessionStorage.getItem(storagePrefix + 'period') || '');
+      setKeyword(sessionStorage.getItem(storagePrefix + 'keyword') || '');
+      setActiveTab(sessionStorage.getItem(storagePrefix + 'tab') || '全部');
+      setShowDept(sessionStorage.getItem(storagePrefix + 'showDept') === 'true');
+      setShowCounterparty(sessionStorage.getItem(storagePrefix + 'showCP') === 'true');
+  }, [storagePrefix]);
+
+  // Initialize period if empty
   const periods = useMemo(() => Array.from(new Set(balances.map(b => b.period))).sort().reverse(), [balances]);
   useEffect(() => {
     if (!period && periods.length > 0) setPeriod(periods[0]);
@@ -43,6 +63,20 @@ const BalancePage = ({ balances, onDrillDown }: BalancePageProps) => {
   // Helper: Normalize string for search
   const normalize = (str: string) => str ? String(str).replace(/[\s\.]/g, '').toLowerCase() : '';
 
+  // Helper: Get Friendly Counterparty Name
+  const getFriendlyCounterparty = (raw: string | undefined) => {
+      if (!raw) return '-';
+      if (!config) return raw;
+      
+      const matchedEntity = config.entities.find(e => 
+          (e.segmentPrefix && raw.includes(e.segmentPrefix)) || 
+          raw.includes(e.name) ||
+          (e.matchedNameInOtherBooks && raw.includes(e.matchedNameInOtherBooks))
+      );
+
+      return matchedEntity ? matchedEntity.name : raw;
+  };
+
   // 2. Data Processing Pipeline
   
   // Step A: Filter raw data (Period, Element, Keyword)
@@ -57,8 +91,11 @@ const BalancePage = ({ balances, onDrillDown }: BalancePageProps) => {
       // Keyword Search (Multi-field)
       if (keyword) {
         const terms = keyword.toLowerCase().split(' ').filter(t => t);
+        // Use friendly name for search as well
+        const friendlyCP = getFriendlyCounterparty(b.counterparty);
+        
         const searchableText = normalize(
-          `${b.subjectCode} ${b.subjectName} ${b.costCenter} ${b.counterparty}`
+          `${b.subjectCode} ${b.subjectName} ${b.costCenter} ${b.counterparty} ${friendlyCP}`
         );
         // Also allow searching by exact amount
         const amountStr = Math.abs(b.closingBalance).toString();
@@ -70,14 +107,10 @@ const BalancePage = ({ balances, onDrillDown }: BalancePageProps) => {
 
       return true;
     });
-  }, [balances, period, activeTab, keyword]);
+  }, [balances, period, activeTab, keyword, config]);
 
   // Step B: Dynamic Aggregation based on selected dimensions
   const aggregatedData = useMemo(() => {
-    // If showing full details (both dimensions selected), just return sorted raw data
-    // Note: Even if both are selected, we might still want to aggregate if there are multiple rows 
-    // with exact same subject+dept+counterparty (though unlikely in standard TB, safer to aggregate).
-    
     const aggMap = new Map<string, BalanceRow>();
 
     filteredRawData.forEach(row => {
@@ -125,6 +158,28 @@ const BalancePage = ({ balances, onDrillDown }: BalancePageProps) => {
     (currentPage - 1) * ITEMS_PER_PAGE,
     currentPage * ITEMS_PER_PAGE
   );
+
+  const handleExport = () => {
+    if (aggregatedData.length === 0) return;
+    
+    const exportData = aggregatedData.map(r => ({
+        '期间': r.period,
+        '科目编码': r.subjectCode,
+        '科目名称': r.subjectName,
+        '会计要素': r.accountElement,
+        '成本中心': showDept ? r.costCenter : '(未展开)',
+        '往来单位': showCounterparty ? getFriendlyCounterparty(r.counterparty) : '(未展开)',
+        '期初余额': r.openingBalance,
+        '本期借方': r.debitPeriod,
+        '本期贷方': r.creditPeriod,
+        '期末余额': r.closingBalance,
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(exportData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "余额表");
+    XLSX.writeFile(workbook, `余额表_${period || '全部'}_${new Date().getTime()}.xlsx`);
+  };
 
   return (
     <div className="space-y-6">
@@ -190,6 +245,15 @@ const BalancePage = ({ balances, onDrillDown }: BalancePageProps) => {
                 >
                     <Building2 size={14} />
                     {showCounterparty ? '已按往来区分' : '按往来区分'}
+                </button>
+
+                <button 
+                  onClick={handleExport}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-xs font-bold transition-all ml-2"
+                  title="导出当前表格"
+                >
+                   <Download size={14} />
+                   导出
                 </button>
             </div>
         </div>
@@ -259,7 +323,7 @@ const BalancePage = ({ balances, onDrillDown }: BalancePageProps) => {
                         <td className="px-6 py-4 text-xs font-medium text-blue-600 truncate max-w-[200px]" title={row.counterparty}>
                              <div className="flex items-center gap-1">
                                 {row.counterparty && row.counterparty !== '-' && row.counterparty !== '多客商汇总' && <Users size={12} className="opacity-50" />}
-                                {row.counterparty || '-'}
+                                {getFriendlyCounterparty(row.counterparty)}
                              </div>
                         </td>
                     )}

@@ -1,6 +1,5 @@
-
 import React, { useState } from 'react';
-import { Upload, FileIcon, Loader2, History, CheckCircle2, Eye, Building2 } from 'lucide-react';
+import { Upload, FileIcon, Loader2, History, CheckCircle2, Eye, Building2, Trash2, AlertTriangle } from 'lucide-react';
 import { LedgerRow, BalanceRow, SystemConfig, ImportHistoryItem, Company } from '../types';
 import { parseCSVData, parseExcelData, parseBalanceCSV, parseExcelBalance } from '../services/reconciliationUtils';
 import { db } from '../db';
@@ -12,7 +11,7 @@ interface ImportPageProps {
   importHistory: ImportHistoryItem[];
 }
 
-const ImportPage = ({ currentEntity, onDataChanged, config, importHistory }: ImportPageProps) => {
+const ImportPage: React.FC<ImportPageProps> = ({ currentEntity, onDataChanged, config, importHistory }) => {
   const [activeTab, setActiveTab] = useState<'new' | 'history'>('new');
   const [step, setStep] = useState(1);
   const [importType, setImportType] = useState<'ledger' | 'balance'>('ledger');
@@ -21,6 +20,7 @@ const ImportPage = ({ currentEntity, onDataChanged, config, importHistory }: Imp
   const [isParsing, setIsParsing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -70,18 +70,21 @@ const ImportPage = ({ currentEntity, onDataChanged, config, importHistory }: Imp
 
   const executeImport = async () => {
     setIsSaving(true);
+    const importId = `batch-${Date.now()}`;
+    const rowsWithBatch = parsedRows.map(r => ({ ...r, importId }));
+
     try {
       await (db as any).transaction('rw', db.ledger, db.balances, db.history, async () => {
         // 1. Bulk Add Data
         if (importType === 'ledger') {
-          await db.ledger.bulkAdd(parsedRows as LedgerRow[]);
+          await db.ledger.bulkAdd(rowsWithBatch as LedgerRow[]);
         } else {
-          await db.balances.bulkAdd(parsedRows as BalanceRow[]);
+          await db.balances.bulkAdd(rowsWithBatch as BalanceRow[]);
         }
 
         // 2. Add History Record
         const historyItem: ImportHistoryItem = {
-           id: `h-${Date.now()}`,
+           id: importId, // Use batch ID as history ID
            entityId: currentEntity.id,
            fileName: rawFile?.name || 'unknown',
            importDate: new Date().toLocaleString(),
@@ -99,6 +102,30 @@ const ImportPage = ({ currentEntity, onDataChanged, config, importHistory }: Imp
       setErrorMsg("保存数据至本地数据库失败，请重试。");
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const handleDeleteBatch = async (item: ImportHistoryItem) => {
+    if (!window.confirm(`确定要撤销并删除导入批次 "${item.fileName}" 吗？该批次的所有财务记录将被永久移除。`)) {
+        return;
+    }
+
+    setDeletingId(item.id);
+    try {
+        await (db as any).transaction('rw', db.ledger, db.balances, db.history, async () => {
+            if (item.type === 'ledger') {
+                await db.ledger.where('importId').equals(item.id).delete();
+            } else {
+                await db.balances.where('importId').equals(item.id).delete();
+            }
+            await db.history.delete(item.id);
+        });
+        onDataChanged();
+    } catch (err) {
+        console.error("Delete failed:", err);
+        alert("删除失败，请重试。");
+    } finally {
+        setDeletingId(null);
     }
   };
 
@@ -266,27 +293,53 @@ const ImportPage = ({ currentEntity, onDataChanged, config, importHistory }: Imp
 
   const renderHistory = () => (
     <div className="bg-white rounded-3xl p-8 border border-slate-100 shadow-sm">
-      <h3 className="text-lg font-bold text-slate-800 mb-6">导入历史记录 ({currentEntity.name})</h3>
+      <div className="flex items-center justify-between mb-6">
+        <h3 className="text-lg font-bold text-slate-800">导入历史记录 ({currentEntity.name})</h3>
+        <div className="flex items-center gap-2 p-2 bg-amber-50 text-amber-700 text-[10px] rounded-lg border border-amber-100">
+           <AlertTriangle size={12} />
+           <span>撤销批次将同时从财务报表中移除该批次对应的所有凭证或余额数据。</span>
+        </div>
+      </div>
       <table className="w-full text-sm text-left">
         <thead className="bg-slate-50 text-slate-500 font-bold text-xs uppercase">
           <tr>
             <th className="px-6 py-4">文件名</th>
-            <th className="px-6 py-4">类型</th>
+            <th className="px-4 py-4">类型</th>
             <th className="px-6 py-4">时间</th>
-            <th className="px-6 py-4 text-center">条数</th>
-            <th className="px-6 py-4 text-center">状态</th>
+            <th className="px-4 py-4 text-center">条数</th>
+            <th className="px-4 py-4 text-center">状态</th>
+            <th className="px-4 py-4 text-right">操作</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
           {importHistory.map(item => (
-            <tr key={item.id}>
-              <td className="px-6 py-4 font-bold text-slate-700">{item.fileName}</td>
-              <td className="px-6 py-4">{item.type === 'ledger' ? '明细账' : '余额表'}</td>
-              <td className="px-6 py-4 text-slate-500">{item.importDate}</td>
-              <td className="px-6 py-4 text-center font-bold">{item.recordCount}</td>
-              <td className="px-6 py-4 text-center text-emerald-500"><CheckCircle2 size={16} className="mx-auto" /></td>
+            <tr key={item.id} className="hover:bg-slate-50 transition-colors">
+              <td className="px-6 py-4 font-bold text-slate-700 truncate max-w-[200px]" title={item.fileName}>{item.fileName}</td>
+              <td className="px-4 py-4">
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${item.type === 'ledger' ? 'bg-indigo-50 text-indigo-600' : 'bg-blue-50 text-blue-600'}`}>
+                    {item.type === 'ledger' ? '明细账' : '余额表'}
+                  </span>
+              </td>
+              <td className="px-6 py-4 text-slate-500 text-xs">{item.importDate}</td>
+              <td className="px-4 py-4 text-center font-bold text-slate-600">{item.recordCount}</td>
+              <td className="px-4 py-4 text-center text-emerald-500"><CheckCircle2 size={16} className="mx-auto" /></td>
+              <td className="px-4 py-4 text-right">
+                <button 
+                  onClick={() => handleDeleteBatch(item)}
+                  disabled={deletingId === item.id}
+                  className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                  title="撤销并删除该批次"
+                >
+                  {deletingId === item.id ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                </button>
+              </td>
             </tr>
           ))}
+          {importHistory.length === 0 && (
+            <tr>
+              <td colSpan={6} className="px-6 py-12 text-center text-slate-400 italic">暂无导入历史记录</td>
+            </tr>
+          )}
         </tbody>
       </table>
     </div>
@@ -296,7 +349,7 @@ const ImportPage = ({ currentEntity, onDataChanged, config, importHistory }: Imp
     <div className="space-y-6">
       <div className="flex gap-4 border-b border-slate-200 pb-1">
         <button onClick={() => setActiveTab('new')} className={`px-4 py-2 text-sm font-bold border-b-2 ${activeTab === 'new' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500'}`}>新导入</button>
-        <button onClick={() => setActiveTab('history')} className={`px-4 py-2 text-sm font-bold border-b-2 ${activeTab === 'history' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500'}`}>历史记录</button>
+        <button onClick={() => setActiveTab('history')} className={`px-4 py-2 text-sm font-bold border-b-2 ${activeTab === 'history' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500'}`}>历史记录与撤销</button>
       </div>
       {activeTab === 'new' ? renderNewImport() : renderHistory()}
     </div>

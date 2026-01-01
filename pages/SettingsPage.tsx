@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Save, LayoutTemplate, Building2, Tag, Plus, X, BookOpen, ArrowRightLeft, HelpCircle, Bot, Eye, EyeOff, Database, Download, Upload, Loader2, RefreshCw } from 'lucide-react';
+import { Save, LayoutTemplate, Building2, Tag, Plus, X, BookOpen, ArrowRightLeft, HelpCircle, Bot, Eye, EyeOff, Database, Download, Upload, Loader2, RefreshCw, Trash2, AlertOctagon } from 'lucide-react';
 import { SystemConfig } from '../types';
 import { db } from '../db';
 
@@ -19,27 +19,11 @@ const SettingsPage = ({ config, onSave }: SettingsPageProps) => {
   const [newDeptCode, setNewDeptCode] = useState('');
   const [newDeptName, setNewDeptName] = useState('');
 
-  // API Key State
-  const [apiKey, setApiKey] = useState('');
-  const [showKey, setShowKey] = useState(false);
-
   // Backup State
   const [isBackingUp, setIsBackingUp] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    const storedKey = localStorage.getItem('DASHSCOPE_API_KEY');
-    if (storedKey) setApiKey(storedKey);
-  }, []);
-
-  const handleSaveApiKey = () => {
-    if (apiKey.trim()) {
-      localStorage.setItem('DASHSCOPE_API_KEY', apiKey.trim());
-      setMsg('API Key 已保存');
-      setTimeout(() => setMsg(''), 3000);
-    }
-  };
 
   // --- Handlers ---
 
@@ -99,6 +83,9 @@ const SettingsPage = ({ config, onSave }: SettingsPageProps) => {
         exportData.tables.ledger = await db.ledger.toArray();
         exportData.tables.balances = await db.balances.toArray();
         exportData.tables.history = await db.history.toArray();
+        // Export Knowledge (Shared)
+        exportData.tables.knowledge = await db.knowledge.toArray();
+        exportData.tables.chunks = await db.chunks.toArray();
 
         // Create Blob
         const blob = new Blob([JSON.stringify(exportData)], { type: 'application/json' });
@@ -113,7 +100,7 @@ const SettingsPage = ({ config, onSave }: SettingsPageProps) => {
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
 
-        setMsg('数据库备份已下载');
+        setMsg('全库备份（含共享知识库）已下载');
         setTimeout(() => setMsg(''), 3000);
     } catch (e) {
         console.error("Backup failed", e);
@@ -134,7 +121,7 @@ const SettingsPage = ({ config, onSave }: SettingsPageProps) => {
       const file = e.target.files?.[0];
       if (!file) return;
 
-      if (!window.confirm("警告：恢复备份将覆盖当前所有数据（包括配置、流水、余额表）。此操作不可撤销！\n\n确定要继续吗？")) {
+      if (!window.confirm("警告：恢复备份将覆盖当前所有数据（包括配置、流水、余额表、知识库）。此操作不可撤销！\n\n确定要继续吗？")) {
           return;
       }
 
@@ -150,24 +137,28 @@ const SettingsPage = ({ config, onSave }: SettingsPageProps) => {
               }
 
               // Restore
-              await (db as any).transaction('rw', db.ledger, db.balances, db.history, async () => {
+              await (db as any).transaction('rw', db.ledger, db.balances, db.history, db.knowledge, db.chunks, async () => {
                   // Clear existing
                   await db.ledger.clear();
                   await db.balances.clear();
                   await db.history.clear();
+                  await db.knowledge.clear();
+                  await db.chunks.clear();
 
                   // Add new
                   if (data.tables.ledger?.length) await db.ledger.bulkAdd(data.tables.ledger);
                   if (data.tables.balances?.length) await db.balances.bulkAdd(data.tables.balances);
                   if (data.tables.history?.length) await db.history.bulkAdd(data.tables.history);
+                  if (data.tables.knowledge?.length) await db.knowledge.bulkAdd(data.tables.knowledge);
+                  if (data.tables.chunks?.length) await db.chunks.bulkAdd(data.tables.chunks);
               });
 
               // Restore Config
               onSave(data.config);
               setFormData(data.config); // Update local state
               
-              alert(`数据恢复成功！\n\n已恢复:\n- ${data.tables.ledger?.length || 0} 条明细\n- ${data.tables.balances?.length || 0} 条余额\n- 配置信息`);
-              window.location.reload(); // Reload to refresh all states
+              alert(`数据恢复成功！页面将刷新以应用更改。`);
+              window.location.reload(); 
 
           } catch (err) {
               console.error("Restore failed", err);
@@ -177,6 +168,30 @@ const SettingsPage = ({ config, onSave }: SettingsPageProps) => {
           }
       };
       reader.readAsText(file);
+  };
+
+  const handleClearAllData = async () => {
+      if (!window.confirm("【危险操作】此操作将清空本地数据库中的所有财务数据、知识库文档与向量索引。\n\n确定要清空吗？")) {
+          return;
+      }
+      
+      setIsClearing(true);
+      try {
+          await (db as any).transaction('rw', db.ledger, db.balances, db.history, db.knowledge, db.chunks, async () => {
+              await db.ledger.clear();
+              await db.balances.clear();
+              await db.history.clear();
+              await db.knowledge.clear();
+              await db.chunks.clear();
+          });
+          alert("数据已清空，页面将刷新。");
+          window.location.reload();
+      } catch (err) {
+          console.error("Clear failed", err);
+          alert("清空失败");
+      } finally {
+          setIsClearing(false);
+      }
   };
 
   return (
@@ -222,50 +237,61 @@ const SettingsPage = ({ config, onSave }: SettingsPageProps) => {
                     <span className="text-sm font-bold text-slate-600 group-hover:text-red-600">恢复备份数据</span>
                 </button>
             </div>
-            <p className="text-[10px] text-slate-400 leading-relaxed">
-                提示：备份文件包含所有账套的配置、明细账和余额表数据。恢复操作将<span className="text-red-500 font-bold">覆盖现有所有数据</span>，请谨慎操作。
-            </p>
+            
+            <div className="pt-2 border-t border-slate-100">
+               <button 
+                  onClick={handleClearAllData}
+                  disabled={isClearing}
+                  className="w-full py-2 flex items-center justify-center gap-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors text-xs font-bold"
+               >
+                   {isClearing ? <Loader2 size={12} className="animate-spin"/> : <Trash2 size={12} />}
+                   清空所有业务数据 (危险)
+               </button>
+            </div>
         </div>
 
-        {/* 0.5 AI Engine Config */}
-        <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm space-y-6">
-            <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
-                <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg">
+        {/* 0.5 AI Engine Status (DeepSeek Configuration) */}
+        <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm space-y-6 relative overflow-hidden">
+            <div className="flex items-center gap-3 border-b border-slate-100 pb-4 relative z-10">
+                <div className="p-2 bg-blue-50 text-blue-600 rounded-lg">
                     <Bot size={20} />
                 </div>
                 <div>
-                    <h3 className="font-bold text-slate-800">AI 智能引擎配置</h3>
-                    <p className="text-xs text-slate-400">配置通义千问 (Qwen) API 以启用智能对账与凭证匹配功能</p>
+                    <h3 className="font-bold text-slate-800">DeepSeek AI 引擎配置</h3>
+                    <p className="text-xs text-slate-400">使用深度求索 (DeepSeek V3) 进行智能分析</p>
                 </div>
             </div>
-            <div className="flex gap-4 items-end">
-                <div className="flex-1">
-                    <label className="text-xs font-bold text-slate-600 mb-2 block">DashScope API Key</label>
-                    <div className="relative">
+            
+            <div className="relative z-10 space-y-4">
+                <div className="space-y-2">
+                    <label className="text-sm font-bold text-slate-700">DeepSeek API Key</label>
+                    <div className="flex items-center gap-2">
                         <input 
-                            type={showKey ? "text" : "password"} 
-                            value={apiKey}
-                            onChange={(e) => setApiKey(e.target.value)}
-                            placeholder="sk-..."
-                            className="w-full pl-4 pr-10 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-mono focus:border-indigo-500 focus:bg-white outline-none transition-all"
+                            type="password"
+                            value={formData.aiApiKey || ''}
+                            onChange={(e) => setFormData(prev => ({...prev, aiApiKey: e.target.value}))}
+                            placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+                            className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:border-blue-500 font-mono"
                         />
-                        <button 
-                            onClick={() => setShowKey(!showKey)}
-                            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-indigo-600"
-                        >
-                            {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
-                        </button>
                     </div>
-                    <p className="text-[10px] text-slate-400 mt-2">
-                        Key 仅存储在本地浏览器 LocalStorage 中，不会上传至任何服务器。
-                    </p>
                 </div>
-                <button 
-                    onClick={handleSaveApiKey}
-                    className="px-6 py-2.5 bg-indigo-50 text-indigo-600 font-bold rounded-xl hover:bg-indigo-100 border border-indigo-200 transition-all h-[42px] mb-[22px]"
-                >
-                    保存 Key
-                </button>
+
+                <div className="flex items-center gap-4">
+                    {formData.aiApiKey ? (
+                        <div className="flex items-center gap-2 text-emerald-600 bg-emerald-50 px-3 py-2 rounded-lg border border-emerald-100">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                            <span className="text-sm font-bold">Key 已配置</span>
+                        </div>
+                    ) : (
+                        <div className="flex items-center gap-2 text-red-600 bg-red-50 px-3 py-2 rounded-lg border border-red-100">
+                            <span className="w-2 h-2 rounded-full bg-red-500"></span>
+                            <span className="text-sm font-bold">未配置</span>
+                        </div>
+                    )}
+                    <span className="text-xs text-slate-400 flex-1">
+                        AI 知识库和向量索引是<span className="text-blue-600 font-bold">共享资源</span>。更换 AI 引擎后，建议清空旧的向量数据并重新学习文档。
+                    </span>
+                </div>
             </div>
         </div>
       </div>

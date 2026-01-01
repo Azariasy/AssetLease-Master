@@ -1,19 +1,22 @@
 
 import Dexie, { Table } from 'dexie';
-import { LedgerRow, BalanceRow, ImportHistoryItem } from './types';
+import { LedgerRow, BalanceRow, ImportHistoryItem, KnowledgeDocument, KnowledgeChunk } from './types';
 
 export class FinanceDB extends Dexie {
   ledger!: Table<LedgerRow, string | number>;
   balances!: Table<BalanceRow, string | number>;
   history!: Table<ImportHistoryItem, string>;
+  knowledge!: Table<KnowledgeDocument, string>;
+  chunks!: Table<KnowledgeChunk, string>;
 
   constructor() {
-    super('FinanceMasterDB_v3');
+    super('FinanceMasterDB_v5'); // Version bumped for chunks table
     (this as any).version(1).stores({
-      // Added importId index for batch rollback
       ledger: 'id, entityId, period, subjectCode, importId, [entityId+period], [entityId+counterparty]', 
       balances: 'id, entityId, period, subjectCode, importId, [entityId+period], [entityId+counterparty]',
-      history: 'id, entityId, type'
+      history: 'id, entityId, type',
+      knowledge: 'id, category, status',
+      chunks: 'id, documentId, tags' // Indexed by doc and tags
     });
   }
 }

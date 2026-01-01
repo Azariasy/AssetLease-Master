@@ -19,6 +19,9 @@ export interface SystemConfig {
   
   // New: 关联方配置
   entities: Company[];
+  
+  // New: DeepSeek API Key
+  aiApiKey?: string;
 }
 
 // 字段映射模板
@@ -38,6 +41,29 @@ export interface ImportHistoryItem {
   recordCount: number;
   type: 'ledger' | 'balance';
   status: 'success' | 'failed';
+}
+
+// 知识库文档 (AI Knowledge)
+export interface KnowledgeDocument {
+  id: string;
+  title: string;
+  content: string;     // Raw content
+  summary: string;     // AI extracted rules/summary
+  category: 'policy' | 'accounting_manual' | 'business_rule';
+  uploadDate: string;
+  status: 'processing' | 'active' | 'error';
+  // New: Knowledge Graph Entities
+  entities?: string[]; 
+}
+
+// New: RAG Semantic Chunk
+export interface KnowledgeChunk {
+  id: string;
+  documentId: string;
+  content: string;      // The actual text segment
+  embedding: number[];  // Vector representation
+  tags: string[];       // Entities mentioned in this chunk
+  sourceTitle: string;  // For citation
 }
 
 // 1. 财务流水 (账户明细表)
@@ -130,6 +156,15 @@ export interface AnalysisResult {
     value: string;
     status: string;
   }>;
+}
+
+export interface ComplianceResult {
+  rowId: string | number;
+  voucherNo: string;
+  summary: string;
+  issue: string;
+  policySource: string; // Title of the doc
+  severity: 'high' | 'medium' | 'low';
 }
 
 // --- Additional Types and Enums for Extended UI Components ---

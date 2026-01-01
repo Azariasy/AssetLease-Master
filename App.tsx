@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   LayoutDashboard, TableProperties, ListFilter, Import, Settings, 
-  Search, Bell, ChevronRight, Building2, RefreshCw, KeyRound, Check, Eye, EyeOff
+  Search, Bell, ChevronRight, Building2, RefreshCw, KeyRound, Check, Eye, EyeOff, Book, BrainCircuit
 } from 'lucide-react';
 import { db } from './db';
 
@@ -12,11 +12,12 @@ import BalancePage from './pages/BalancePage';
 import LedgerPage from './pages/LedgerPage';   
 import ImportPage from './pages/ImportPage';   
 import SettingsPage from './pages/SettingsPage';
+import KnowledgePage from './pages/KnowledgePage'; // New Page
 
 // Types
 import { LedgerRow, BalanceRow, SystemConfig, ImportHistoryItem, Company } from './types';
 
-// Default Config Updated with User's specific entities
+// Default Config Updated with User's specific entities & Manual's Logic
 const DEFAULT_COMPANIES: Company[] = [
   { 
     id: 'ent_listed', 
@@ -36,10 +37,13 @@ const DEFAULT_COMPANIES: Company[] = [
 
 const DEFAULT_CONFIG: SystemConfig = {
   mappingTemplates: [],
-  // Updated Income Codes based on user provided real data (Class 5 Income)
-  incomeSubjectCodes: ['5111', '5121', '5141', '5171', '5201', '5301'],
-  // Updated Cost/Expense Codes based on user provided real data (Class 5 Costs)
-  costSubjectCodes: ['5410', '5411', '5421', '5471', '5481', '5501', '5502', '5503', '5504', '5601', '5603'],
+  // 收入类：5xxx (移动网业务收入, 其他业务收入)
+  incomeSubjectCodes: ['5001', '5051', '5111', '5121', '5141', '5171', '5201', '5301', '6001', '6051', '6301'],
+  // 成本费用类：54xx (营业成本), 66xx (期间费用)
+  costSubjectCodes: ['5401', '5410', '5411', '5421', '6401', '6402', '6601', '6602', '6603', '5501', '5502', '5601'],
+  // 资产类：16xx (固定资产/在建工程), 19xx (工程物资) - Added for CAPEX analysis
+  // These are not in the interface explicitly but used in logic derived from Manual
+  
   accountSegmentIndex: 4,
   subAccountSegmentIndex: 5,
   // 真实部门数据映射 (Key: 6位部门段代码, Value: 通用部门名称)
@@ -73,36 +77,26 @@ const DEFAULT_CONFIG: SystemConfig = {
     "260008": "党委办公室（党群工作部/党风廉政办公室）",
     "260028": "教育产品二中心"
   },
-  entities: DEFAULT_COMPANIES
+  entities: DEFAULT_COMPANIES,
+  aiApiKey: '' // Default empty
 };
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [isLoading, setIsLoading] = useState(false);
-  const [apiKey, setApiKey] = useState<string>('');
-  const [hasApiKey, setHasApiKey] = useState(false);
   
   // New: Privacy Mode
   const [privacyMode, setPrivacyMode] = useState(false);
-
-  // Check API Key on load (Non-blocking now)
-  useEffect(() => {
-    const storedKey = localStorage.getItem('DASHSCOPE_API_KEY');
-    if (storedKey && storedKey.length > 10) {
-      setApiKey(storedKey);
-      setHasApiKey(true);
-    }
-  }, [activeTab]); // Re-check when tab changes (e.g. returning from Settings)
 
   // 1. Initialize Configuration from LocalStorage
   const [config, setConfig] = useState<SystemConfig>(() => {
     const saved = localStorage.getItem('sys_config');
     if (saved) {
         const parsed = JSON.parse(saved);
-        // Migration: If using old standard codes (6001), update to new custom codes (5111) from DEFAULT_CONFIG
-        if (parsed.incomeSubjectCodes && parsed.incomeSubjectCodes.includes('6001')) {
-             parsed.incomeSubjectCodes = DEFAULT_CONFIG.incomeSubjectCodes;
-             parsed.costSubjectCodes = DEFAULT_CONFIG.costSubjectCodes;
+        // Migration: Ensure new standard codes are included if user has old config
+        if (!parsed.incomeSubjectCodes.includes('5001')) {
+             parsed.incomeSubjectCodes = [...new Set([...parsed.incomeSubjectCodes, ...DEFAULT_CONFIG.incomeSubjectCodes])];
+             parsed.costSubjectCodes = [...new Set([...parsed.costSubjectCodes, ...DEFAULT_CONFIG.costSubjectCodes])];
         }
         
         // Merge with default map if specific keys are missing to ensure user has the latest dictionary
@@ -111,7 +105,6 @@ const App: React.FC = () => {
         }
         
         // Ensure entity structure is up to date WITHOUT overwriting IDs
-        // Iterate through defaults and patch missing fields in saved entities if ID matches
         const patchedEntities = parsed.entities.map((savedEnt: any) => {
             const defaultEnt = DEFAULT_COMPANIES.find(d => d.id === savedEnt.id);
             if (defaultEnt) {
@@ -120,7 +113,6 @@ const App: React.FC = () => {
             return savedEnt;
         });
         
-        // If critical default entities are missing entirely, append them
         DEFAULT_COMPANIES.forEach(def => {
             if (!patchedEntities.some((e: any) => e.id === def.id)) {
                 patchedEntities.push(def);
@@ -136,7 +128,6 @@ const App: React.FC = () => {
   // 2. Initialize Entity ID *AFTER* Config is ready
   const [currentEntityId, setCurrentEntityId] = useState<string>(() => {
      const savedId = localStorage.getItem('last_entity_id');
-     // Validate if saved ID exists in the loaded config
      if (savedId && config.entities.some(e => e.id === savedId)) {
          return savedId;
      }
@@ -170,16 +161,13 @@ const App: React.FC = () => {
     };
     loadData();
     
-    // Persist selection
     localStorage.setItem('last_entity_id', currentEntityId);
   }, [currentEntityId]);
 
-  // Save Config Persistence
   useEffect(() => {
     localStorage.setItem('sys_config', JSON.stringify(config));
   }, [config]);
 
-  // Navigation Handler
   const handleNavigate = (tab: string, params?: any) => {
     if (params) setDrillDownFilter(params);
     else setDrillDownFilter(null);
@@ -188,7 +176,6 @@ const App: React.FC = () => {
 
   const handleRefreshData = async () => {
       setIsLoading(true);
-      // Re-fetch current entity data
       const balances = await db.balances.where('entityId').equals(currentEntityId).toArray();
       const ledgers = await db.ledger.where('entityId').equals(currentEntityId).toArray();
       const history = await db.history.where('entityId').equals(currentEntityId).reverse().toArray();
@@ -210,8 +197,6 @@ const App: React.FC = () => {
       );
     }
 
-    // Adding key={currentEntityId} forces React to destroy and recreate the component when entity changes.
-    // This effectively resets internal state (like filters in BalancePage/LedgerPage) automatically.
     switch (activeTab) {
       case 'dashboard':
         return <DashboardPage 
@@ -222,7 +207,7 @@ const App: React.FC = () => {
             ledger={ledgerData} 
             config={config}
             onNavigate={(tab) => handleNavigate(tab)}
-            privacyMode={privacyMode} // Pass Privacy Mode
+            privacyMode={privacyMode} 
         />;
       case 'balances':
         return <BalancePage 
@@ -231,7 +216,7 @@ const App: React.FC = () => {
           onDrillDown={(code, period) => handleNavigate('ledger', { subjectCode: code, period })}
           config={config}
           currentEntity={currentEntity} 
-          privacyMode={privacyMode} // Pass Privacy Mode
+          privacyMode={privacyMode} 
         />;
       case 'ledger':
         return <LedgerPage 
@@ -240,7 +225,7 @@ const App: React.FC = () => {
           initialFilter={drillDownFilter}
           config={config}
           currentEntity={currentEntity}
-          privacyMode={privacyMode} // Pass Privacy Mode
+          privacyMode={privacyMode} 
         />;
       case 'import':
         return <ImportPage 
@@ -251,6 +236,8 @@ const App: React.FC = () => {
           importHistory={importHistory}
           onConfigUpdate={setConfig}
         />;
+      case 'knowledge':
+        return <KnowledgePage />;
       case 'settings':
         return <SettingsPage config={config} onSave={(newConfig) => setConfig(newConfig)} />; 
       default:
@@ -264,10 +251,13 @@ const App: React.FC = () => {
       case 'balances': return '科目余额表';
       case 'ledger': return '明细账查询';
       case 'import': return '数据导入';
+      case 'knowledge': return 'AI 知识库 (DeepSeek)';
       case 'settings': return '系统配置';
       default: return '首页';
     }
   };
+
+  const hasApiKey = config.aiApiKey && config.aiApiKey.length > 10;
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden">
@@ -275,11 +265,11 @@ const App: React.FC = () => {
       <aside className="w-64 bg-slate-900 text-slate-300 flex flex-col shadow-2xl z-10">
         <div className="p-6 flex items-center gap-3 text-white border-b border-slate-800/50">
           <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center shadow-lg">
-            <span className="font-bold text-lg">G</span>
+            <span className="font-bold text-lg">F</span>
           </div>
           <div>
             <h1 className="font-bold text-sm tracking-wide">Finance Master</h1>
-            <p className="text-[10px] text-slate-500 font-medium">集团财务数据中心 v4.1</p>
+            <p className="text-[10px] text-slate-500 font-medium">财务数据中心 v4.5</p>
           </div>
         </div>
 
@@ -319,6 +309,9 @@ const App: React.FC = () => {
           <NavItem icon={<ListFilter size={18} />} label="明细账" active={activeTab === 'ledger'} onClick={() => handleNavigate('ledger')} />
           <NavItem icon={<Import size={18} />} label="数据导入" active={activeTab === 'import'} onClick={() => handleNavigate('import')} />
           
+          <div className="pt-6 pb-2 px-4 text-xs font-bold text-slate-600 uppercase tracking-wider">智能中心</div>
+          <NavItem icon={<BrainCircuit size={18} />} label="AI 知识库" active={activeTab === 'knowledge'} onClick={() => handleNavigate('knowledge')} />
+
           <div className="pt-6 pb-2 px-4 text-xs font-bold text-slate-600 uppercase tracking-wider">系统管理</div>
           <NavItem icon={<Settings size={18} />} label="系统参数" active={activeTab === 'settings'} onClick={() => handleNavigate('settings')} />
         </nav>
@@ -349,9 +342,9 @@ const App: React.FC = () => {
 
             {/* API Key Status Indicator */}
             {hasApiKey ? (
-                <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-slate-100 rounded-full border border-slate-200" title="AI 引擎已就绪">
+                <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-slate-100 rounded-full border border-slate-200" title="DeepSeek 引擎已就绪">
                     <div className="w-2 h-2 rounded-full bg-emerald-500"></div>
-                    <span className="text-[10px] font-bold text-slate-500">AI Ready</span>
+                    <span className="text-[10px] font-bold text-slate-500">DeepSeek Ready</span>
                 </div>
             ) : (
                 <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-red-50 rounded-full border border-red-100 cursor-pointer hover:bg-red-100" onClick={() => setActiveTab('settings')}>

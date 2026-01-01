@@ -19,6 +19,13 @@ const ContractPage = ({ contracts, onImport }: { contracts: LeaseContract[], onI
       const base64 = (evt.target?.result as string).split(',')[1];
       try {
         const extractedData = await extractContractData(base64, file.type);
+        
+        // Validate payment cycle
+        const validCycles = ['月度', '季度', '年度', '一次性'];
+        const paymentCycle = validCycles.includes(extractedData.paymentCycle) 
+            ? (extractedData.paymentCycle as '月度' | '季度' | '年度' | '一次性') 
+            : '季度';
+
         // Create new contract from AI data
         const newContract: LeaseContract = {
           id: `new-${Date.now()}`,
@@ -32,7 +39,7 @@ const ContractPage = ({ contracts, onImport }: { contracts: LeaseContract[], onI
           unitIds: [], // 需要人工关联
           rentAmount: extractedData.amount || 0,
           propertyFee: 0,
-          paymentCycle: extractedData.paymentCycle || '季度',
+          paymentCycle: paymentCycle,
           status: '履行中',
           aiAnalysis: 'AI 自动提取完成，请核对金额与周期。'
         };

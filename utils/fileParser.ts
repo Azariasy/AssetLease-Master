@@ -16,7 +16,7 @@ if (typeof window !== 'undefined' && 'Worker' in window) {
   }
 }
 
-export const extractTextFromFile = async (file: File): Promise<string> => {
+export const extractTextFromFile = async (file: File, onProgress?: (percent: number, msg: string) => void): Promise<string> => {
   const fileType = file.name.split('.').pop()?.toLowerCase();
 
   switch (fileType) {
@@ -24,14 +24,16 @@ export const extractTextFromFile = async (file: File): Promise<string> => {
     case 'md':
     case 'json':
     case 'csv':
+      if (onProgress) onProgress(50, '正在读取文本文件...');
       return await readTextFile(file);
       
     case 'docx':
     case 'doc':
+      if (onProgress) onProgress(50, '正在解析 Word 文档...');
       return await readDocxFile(file);
       
     case 'pdf':
-      return await readPdfFile(file);
+      return await readPdfFile(file, onProgress);
       
     default:
       throw new Error(`不支持的文件格式: .${fileType}。目前支持 .txt, .md, .doc, .docx, .pdf`);
@@ -70,8 +72,8 @@ const readDocxFile = async (file: File): Promise<string> => {
   });
 };
 
-// 3. PDF Parser using PDF.js
-const readPdfFile = async (file: File): Promise<string> => {
+// 3. PDF Parser using PDF.js (Optimized for Large Files)
+const readPdfFile = async (file: File, onProgress?: (percent: number, msg: string) => void): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = async (e) => {
@@ -90,13 +92,32 @@ const readPdfFile = async (file: File): Promise<string> => {
             let fullText = '';
             const totalPages = pdfDoc.numPages;
 
-            // Loop through each page
+            if (onProgress) onProgress(0, `检测到 ${totalPages} 页，开始解析...`);
+
+            // Loop through each page with UI Yielding
             for (let i = 1; i <= totalPages; i++) {
-                const page = await pdfDoc.getPage(i);
-                const textContent = await page.getTextContent();
-                // Join text items with space to preserve basic layout flow
-                const pageText = textContent.items.map((item: any) => item.str).join(' ');
-                fullText += `[Page ${i}]\n${pageText}\n\n`;
+                try {
+                    const page = await pdfDoc.getPage(i);
+                    const textContent = await page.getTextContent();
+                    // Join text items with space to preserve basic layout flow
+                    const pageText = textContent.items.map((item: any) => item.str).join(' ');
+                    fullText += `[Page ${i}]\n${pageText}\n\n`;
+
+                    // Report progress every page
+                    if (onProgress) {
+                        const percent = Math.floor((i / totalPages) * 100);
+                        onProgress(percent, `正在解析 PDF 第 ${i}/${totalPages} 页...`);
+                    }
+
+                    // CRITICAL: Yield to main thread every 5 pages to prevent UI freeze
+                    // This allows React to render the progress bar update
+                    if (i % 5 === 0) {
+                        await new Promise(resolve => setTimeout(resolve, 0));
+                    }
+                } catch (pageErr) {
+                    console.warn(`Error parsing page ${i}`, pageErr);
+                    fullText += `[Page ${i} Error]\n\n`;
+                }
             }
             
             if (fullText.trim().length === 0) {

@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Upload, FileText, CheckCircle2, Trash2, BookOpen, BrainCircuit, Loader2, FileUp, Network, Link, Search, Sparkles, MessageSquare, Quote, X, Users, Lightbulb, ArrowRight } from 'lucide-react';
+import { Upload, FileText, CheckCircle2, Trash2, BookOpen, BrainCircuit, Loader2, FileUp, Network, Link, Search, Sparkles, MessageSquare, Quote, X, Users, Lightbulb, ArrowRight, Eye, Layers } from 'lucide-react';
 import { db } from '../db';
 import { KnowledgeDocument, KnowledgeChunk } from '../types';
 import { ingestDocument, queryKnowledgeBase } from '../services/geminiService';
@@ -19,15 +19,20 @@ const SUGGESTED_QUESTIONS = [
 ];
 
 const KnowledgePage: React.FC = () => {
-  const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
+  const [documents, setDocuments] = useState<(KnowledgeDocument & { chunkCount?: number })[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [processStatus, setProcessStatus] = useState<string>('');
+  const [processPercent, setProcessPercent] = useState<number>(0);
   const [activeTab, setActiveTab] = useState<'policy' | 'accounting_manual' | 'business_rule'>('accounting_manual');
 
   // Search State
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   const [searchResult, setSearchResult] = useState<SearchResult | null>(null);
+
+  // Preview Modal State
+  const [previewDoc, setPreviewDoc] = useState<KnowledgeDocument | null>(null);
+  const [previewChunks, setPreviewChunks] = useState<KnowledgeChunk[]>([]);
 
   useEffect(() => {
     loadDocuments();
@@ -37,7 +42,11 @@ const KnowledgePage: React.FC = () => {
     try {
         // Load ALL documents (Shared Knowledge Base)
         const docs = await db.knowledge.toArray();
-        setDocuments(docs.reverse());
+        const docsWithStats = await Promise.all(docs.map(async (d) => {
+            const count = await db.chunks.where('documentId').equals(d.id).count();
+            return { ...d, chunkCount: count };
+        }));
+        setDocuments(docsWithStats.reverse());
     } catch (e) {
         console.error("Failed to load documents", e);
     }
@@ -48,18 +57,25 @@ const KnowledgePage: React.FC = () => {
     if (!files || files.length === 0) return;
 
     setIsProcessing(true);
+    setProcessPercent(0);
     const file = files[0];
     
     try {
         // 1. Extract Text
-        setProcessStatus(`正在解析 ${file.name}...`);
-        const content = await extractTextFromFile(file);
+        setProcessStatus(`准备解析 ${file.name}...`);
+        
+        // Pass progress callback to parser
+        const content = await extractTextFromFile(file, (pct, msg) => {
+            setProcessPercent(pct);
+            setProcessStatus(msg);
+        });
 
         if (!content || content.trim().length < 10) {
             throw new Error("未能提取到有效文本，请检查文件是否为空或为纯图片扫描件。");
         }
         
         // 2. Ingest (Chunk -> Graph -> Embed -> Save)
+        setProcessPercent(100); // Parsing done
         const docId = `doc-${Date.now()}`;
         const { summary, entities } = await ingestDocument(docId, file.name, content, (stage) => setProcessStatus(stage));
         
@@ -85,6 +101,7 @@ const KnowledgePage: React.FC = () => {
     } finally {
         setIsProcessing(false);
         setProcessStatus('');
+        setProcessPercent(0);
     }
   };
 
@@ -124,6 +141,13 @@ const KnowledgePage: React.FC = () => {
       }
   };
 
+  const openPreview = async (doc: KnowledgeDocument) => {
+      setPreviewDoc(doc);
+      // Load chunks for this doc
+      const chunks = await db.chunks.where('documentId').equals(doc.id).toArray();
+      setPreviewChunks(chunks);
+  };
+
   const getRelatedDocs = (currentDoc: KnowledgeDocument) => {
       if (!currentDoc.entities || currentDoc.entities.length === 0) return [];
       return documents.filter(d => 
@@ -145,7 +169,7 @@ const KnowledgePage: React.FC = () => {
   };
 
   return (
-    <div className="max-w-5xl mx-auto space-y-8 pb-20">
+    <div className="max-w-5xl mx-auto space-y-8 pb-20 relative">
       {/* Header */}
       <div className="bg-gradient-to-r from-violet-600 to-indigo-600 p-8 rounded-3xl text-white shadow-xl relative overflow-hidden">
          <div className="relative z-10">
@@ -156,7 +180,7 @@ const KnowledgePage: React.FC = () => {
                         集团共享知识库
                     </h2>
                     <p className="text-violet-100 opacity-90 max-w-2xl text-sm">
-                        这里存储了<b>所有主体共用</b>的财务制度与核算标准。基于 Google Gemini 向量引擎，为您提供精准的语义检索。
+                        这里存储了<b>所有主体共用</b>的财务制度与核算标准。基于向量引擎，为您提供精准的语义检索。
                     </p>
                 </div>
                 <div className="hidden md:flex items-center gap-2 bg-white/10 px-3 py-1.5 rounded-full backdrop-blur-sm border border-white/10">
@@ -284,7 +308,7 @@ const KnowledgePage: React.FC = () => {
                     className={`flex items-center gap-2 px-4 py-2 bg-slate-900 text-white text-sm font-bold rounded-xl cursor-pointer hover:bg-slate-800 transition-all shadow-lg ${isProcessing ? 'opacity-70 cursor-wait' : ''}`}
                 >
                     {isProcessing ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
-                    <span>{isProcessing ? '正在学习...' : '上传制度文档'}</span>
+                    <span>{isProcessing ? `解析中 ${processPercent}%` : '上传制度文档'}</span>
                 </label>
              </div>
          </div>
@@ -309,9 +333,16 @@ const KnowledgePage: React.FC = () => {
          {/* Loading Status */}
          {isProcessing && (
             <div className="flex items-center justify-center p-8 bg-indigo-50/50 rounded-2xl border border-indigo-100 animate-pulse">
-                <div className="text-indigo-600 font-medium flex items-center gap-3">
-                    <Loader2 size={20} className="animate-spin" />
-                    {processStatus || '正在解析文档...'}
+                <div className="flex flex-col items-center gap-2">
+                    <div className="text-indigo-600 font-medium flex items-center gap-3">
+                        <Loader2 size={24} className="animate-spin" />
+                        <span className="text-lg">{processStatus || '正在解析文档...'}</span>
+                    </div>
+                    {processPercent > 0 && processPercent < 100 && (
+                        <div className="w-64 h-2 bg-indigo-100 rounded-full mt-2 overflow-hidden">
+                            <div className="h-full bg-indigo-500 rounded-full transition-all duration-300" style={{ width: `${processPercent}%` }}></div>
+                        </div>
+                    )}
                 </div>
             </div>
          )}
@@ -321,7 +352,7 @@ const KnowledgePage: React.FC = () => {
              {documents.filter(d => d.category === activeTab).map(doc => {
                  const relatedDocs = getRelatedDocs(doc);
                  return (
-                 <div key={doc.id} className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-all group flex flex-col">
+                 <div key={doc.id} className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-all group flex flex-col relative">
                      <div className="flex justify-between items-start mb-3">
                          <div className="flex items-center gap-3 overflow-hidden">
                              <div className="p-2.5 bg-slate-50 text-slate-600 rounded-xl shrink-0">
@@ -332,16 +363,25 @@ const KnowledgePage: React.FC = () => {
                                  <div className="flex items-center gap-2 text-[10px] text-slate-400 mt-1">
                                      <span>{doc.uploadDate.split(' ')[0]}</span>
                                      <span className="w-1 h-1 bg-slate-300 rounded-full"></span>
-                                     <span className="text-emerald-600 flex items-center gap-1"><CheckCircle2 size={10} /> 已索引</span>
+                                     <span className="text-emerald-600 flex items-center gap-1"><CheckCircle2 size={10} /> 已索引 ({doc.chunkCount || 0} 片)</span>
                                  </div>
                              </div>
                          </div>
-                         <button 
-                            onClick={(e) => handleDelete(e, doc.id)} 
-                            className="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                         >
-                             <Trash2 size={16} />
-                         </button>
+                         <div className="flex gap-2">
+                            <button 
+                                onClick={() => openPreview(doc)}
+                                className="p-1.5 text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors"
+                                title="查看解析内容"
+                            >
+                                <Eye size={16} />
+                            </button>
+                            <button 
+                                onClick={(e) => handleDelete(e, doc.id)} 
+                                className="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                            >
+                                <Trash2 size={16} />
+                            </button>
+                         </div>
                      </div>
                      
                      <p className="text-xs text-slate-500 leading-relaxed line-clamp-2 bg-slate-50 p-2 rounded mb-3 flex-1">
@@ -372,6 +412,64 @@ const KnowledgePage: React.FC = () => {
              </div>
          )}
       </div>
+
+      {/* === Document Preview Modal === */}
+      {previewDoc && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl h-[85vh] flex flex-col overflow-hidden">
+                  <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                      <div className="flex items-center gap-3">
+                          <div className="p-2 bg-indigo-100 text-indigo-600 rounded-lg"><FileText size={20} /></div>
+                          <div>
+                              <h3 className="font-bold text-slate-800 text-lg">{previewDoc.title}</h3>
+                              <div className="flex gap-2 text-xs text-slate-500">
+                                  <span>{previewDoc.chunkCount || previewChunks.length} 个切片</span>
+                                  <span>•</span>
+                                  <span>{previewDoc.content.length} 字符</span>
+                              </div>
+                          </div>
+                      </div>
+                      <button onClick={() => setPreviewDoc(null)} className="p-2 hover:bg-slate-200 rounded-full text-slate-500 transition-colors">
+                          <X size={20} />
+                      </button>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto p-6 flex gap-6">
+                      {/* Left: Raw Content */}
+                      <div className="flex-1">
+                          <h4 className="text-xs font-bold text-slate-500 uppercase mb-3 flex items-center gap-2">
+                              <FileText size={14} /> 解析后的纯文本 (Raw Text)
+                          </h4>
+                          <div className="bg-slate-50 rounded-xl p-4 text-xs font-mono text-slate-600 whitespace-pre-wrap leading-relaxed border border-slate-100 h-[calc(100%-2rem)] overflow-y-auto">
+                              {previewDoc.content}
+                          </div>
+                      </div>
+
+                      {/* Right: Chunks */}
+                      <div className="flex-1">
+                          <h4 className="text-xs font-bold text-slate-500 uppercase mb-3 flex items-center gap-2">
+                              <Layers size={14} /> 向量切片预览 (Chunks)
+                          </h4>
+                          <div className="space-y-3 h-[calc(100%-2rem)] overflow-y-auto pr-1">
+                              {previewChunks.map((chunk, idx) => (
+                                  <div key={idx} className="p-3 bg-white border border-indigo-100 rounded-xl shadow-sm hover:border-indigo-300 transition-all text-xs">
+                                      <div className="flex justify-between items-center mb-1">
+                                          <span className="font-bold text-indigo-600">Chunk #{idx + 1}</span>
+                                          <span className="text-slate-300 text-[10px]">{chunk.content.length} chars</span>
+                                      </div>
+                                      <p className="text-slate-600 leading-relaxed">{chunk.content}</p>
+                                  </div>
+                              ))}
+                              {previewChunks.length === 0 && (
+                                  <div className="text-center text-slate-400 py-10">暂无切片数据</div>
+                              )}
+                          </div>
+                      </div>
+                  </div>
+              </div>
+          </div>
+      )}
+
     </div>
   );
 };

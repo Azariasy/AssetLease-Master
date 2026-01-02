@@ -100,9 +100,10 @@ const callAI = async (prompt: string, systemInstruction?: string, jsonMode: bool
 // 2. Embedding Worker Implementation (Stability Upgrade: Dynamic Module)
 // ==========================================
 
-// FIX: Use Dynamic Import inside a Module Worker.
-// This avoids the 'importScripts' NetworkError (by using standard ESM) 
-// and fixes the 'dirname' issue by ensuring we configure env BEFORE any potential path resolution.
+// FIX: We use a Module Worker with Dynamic Imports.
+// 1. Replaced importScripts (Classic) with await import() (Module) to fix NetworkError on CDN.
+// 2. Disabled browser cache to fix the "buffer undefined" error (corrupt WASM cache).
+// 3. Explicitly set wasmPaths to absolute URLs to fix the "dirname" error (path resolution failure).
 const EMBEDDING_WORKER_SCRIPT = `
 let pipeline = null;
 let env = null;
@@ -151,6 +152,7 @@ self.onmessage = async (e) => {
         if (task === 'init') {
              await loadLibrary();
              if (!extractor) {
+                // Use a smaller quantized model for browser stability
                 extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
              }
              self.postMessage({ id, status: 'ready' });
@@ -197,7 +199,7 @@ const getEmbeddingWorker = () => {
             const blob = new Blob([EMBEDDING_WORKER_SCRIPT], { type: 'application/javascript' });
             const url = URL.createObjectURL(blob);
             
-            // FIX: Use { type: 'module' } to support dynamic imports
+            // FIX: Use { type: 'module' } to support dynamic imports inside the worker
             embeddingWorker = new Worker(url, { type: 'module' });
             
             embeddingWorker.onmessage = (e) => {

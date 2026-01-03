@@ -1,6 +1,6 @@
 
-import React, { useState, useEffect, useRef } from 'react';
-import { Upload, FileText, CheckCircle2, Trash2, BrainCircuit, Loader2, FileUp, Sparkles, X, Users, Quote, Send, Bot, BookOpenCheck, ChevronRight, Layers, ExternalLink, Box } from 'lucide-react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Upload, FileText, CheckCircle2, Trash2, BrainCircuit, Loader2, FileUp, Sparkles, X, Users, Quote, Send, Bot, BookOpenCheck, ChevronRight, Layers, ExternalLink, Box, Lightbulb, RotateCcw } from 'lucide-react';
 import { db } from '../db';
 import { KnowledgeDocument, KnowledgeChunk } from '../types';
 import { ingestDocument, queryKnowledgeBaseStream, parseDocumentWithAI, searchKnowledgeBase, getDocumentChunks } from '../services/geminiService';
@@ -14,7 +14,8 @@ interface ChatMessage {
     timestamp: number;
 }
 
-const SUGGESTED_QUESTIONS = [
+// Fallback suggestions if no docs present
+const DEFAULT_SUGGESTIONS = [
     "差旅费的报销标准是多少？",
     "招待费的审批流程是怎样的？",
     "固定资产折旧年限规定？"
@@ -50,6 +51,10 @@ const CitationRenderer = ({ text, sources, onSourceClick }: { text: string, sour
 };
 
 const KnowledgePage: React.FC = () => {
+  // Session Storage Keys
+  const STORAGE_KEY_HISTORY = 'know_chat_history';
+  const STORAGE_KEY_INPUT = 'know_chat_input';
+
   const [activeTab, setActiveTab] = useState<'chat' | 'library'>('library');
   const [documents, setDocuments] = useState<(KnowledgeDocument & { chunkCount?: number })[]>([]);
   
@@ -59,10 +64,18 @@ const KnowledgePage: React.FC = () => {
   const [processPercent, setProcessPercent] = useState<number>(0);
   const [libraryCategory, setLibraryCategory] = useState<'policy' | 'accounting_manual' | 'business_rule'>('accounting_manual');
 
-  // Chat State
-  const [chatInput, setChatInput] = useState('');
+  // Chat State with Persistence
+  const [chatInput, setChatInput] = useState(() => sessionStorage.getItem(STORAGE_KEY_INPUT) || '');
   const [isChatLoading, setIsChatLoading] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>(() => {
+      try {
+          const saved = sessionStorage.getItem(STORAGE_KEY_HISTORY);
+          return saved ? JSON.parse(saved) : [];
+      } catch (e) {
+          return [];
+      }
+  });
+  
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Preview State with Highlight Logic
@@ -81,21 +94,39 @@ const KnowledgePage: React.FC = () => {
     loadDocuments();
   }, []);
 
+  // Persist Messages (Strip heavy embeddings)
+  useEffect(() => {
+      const safeHistory = messages.map(msg => ({
+          ...msg,
+          sources: msg.sources?.map(s => {
+              // Create a shallow copy and remove embedding array to save space
+              const { embedding, ...rest } = s; 
+              return rest as any;
+          })
+      }));
+      sessionStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(safeHistory));
+  }, [messages]);
+
+  // Persist Input
+  useEffect(() => {
+      sessionStorage.setItem(STORAGE_KEY_INPUT, chatInput);
+  }, [chatInput]);
+
   useEffect(() => {
     if (activeTab === 'chat') {
-        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        setTimeout(() => {
+            chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 100);
     }
   }, [messages, activeTab]);
 
-  // SCROLL LOGIC: Trigger scroll when preview content changes AND has a highlight request
+  // SCROLL LOGIC
   useEffect(() => {
       if (previewContent?.highlightChunkId && previewRef.current) {
-          // Add a small delay to ensure rendering and panel expansion is complete
           setTimeout(() => {
               const element = document.getElementById(`chunk-${previewContent.highlightChunkId}`);
               if (element) {
                   element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                  // Optional: Add visual flash effect handled by CSS or just relies on the bg color
               }
           }, 300);
       }
@@ -113,6 +144,25 @@ const KnowledgePage: React.FC = () => {
         console.error("Failed to load documents", e);
     }
   };
+
+  // Compute Dynamic Suggestions based on loaded docs
+  const dynamicSuggestions = useMemo(() => {
+      if (documents.length === 0) return DEFAULT_SUGGESTIONS;
+      // Gather suggested questions from the 3 most recent docs
+      const recentDocs = documents.slice(0, 3);
+      const suggestions: string[] = [];
+      recentDocs.forEach(d => {
+          if (d.suggestedQuestions && d.suggestedQuestions.length > 0) {
+              suggestions.push(d.suggestedQuestions[0]); // Take top question from each
+          }
+      });
+      // Fill remaining slots with defaults if needed, max 3
+      let final = [...suggestions];
+      if (final.length < 3) {
+          final = [...final, ...DEFAULT_SUGGESTIONS.slice(0, 3 - final.length)];
+      }
+      return final;
+  }, [documents]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -140,7 +190,8 @@ const KnowledgePage: React.FC = () => {
         setProcessStatus("AI 正在理解文档并构建向量索引...");
         const docId = `doc-${Date.now()}`;
         
-        const { summary, entities, rules } = await ingestDocument(docId, file.name, fullText, (stage) => setProcessStatus(stage));
+        // Ingest now returns suggestedQuestions
+        const { summary, entities, rules, suggestedQuestions } = await ingestDocument(docId, file.name, fullText, (stage) => setProcessStatus(stage));
         
         const enrichedSummary = summary + (rules && rules.length > 0 ? "\n\n[关键规则]: " + rules.slice(0,3).join("; ") : "");
 
@@ -152,7 +203,8 @@ const KnowledgePage: React.FC = () => {
             entities: entities,
             category: libraryCategory,
             uploadDate: new Date().toLocaleString(),
-            status: 'active'
+            status: 'active',
+            suggestedQuestions: suggestedQuestions
         };
 
         await db.knowledge.add(newDoc);
@@ -177,6 +229,13 @@ const KnowledgePage: React.FC = () => {
           await db.knowledge.delete(id);
           await db.chunks.where('documentId').equals(id).delete();
           setDocuments(prev => prev.filter(d => d.id !== id));
+      }
+  };
+
+  const handleClearChat = () => {
+      if(confirm("确定要清空历史对话记录吗？")) {
+          setMessages([]);
+          sessionStorage.removeItem(STORAGE_KEY_HISTORY);
       }
   };
 
@@ -216,7 +275,6 @@ const KnowledgePage: React.FC = () => {
       }
   };
 
-  // Improved Source Preview Trigger
   const openSourcePreview = (chunk: KnowledgeChunk) => {
       const doc = documents.find(d => d.id === chunk.documentId);
       if (!doc) return;
@@ -225,7 +283,7 @@ const KnowledgePage: React.FC = () => {
           title: chunk.sourceTitle,
           mode: 'doc',
           content: doc.content,
-          highlightChunkId: chunk.id, // Pass ID for robust scrolling
+          highlightChunkId: chunk.id,
           docId: doc.id
       });
   };
@@ -243,14 +301,7 @@ const KnowledgePage: React.FC = () => {
       }
   };
 
-  // Helper to highlight text within the full document content
-  // Since we don't have exact offset storage, we do a split-based approximation which is usually good enough for RAG.
-  // Note: For perfect precision, one would store start/end indices in ingestDocument. 
-  // Here we use a visual marker approach based on finding the text.
   const renderHighlightedContent = (fullText: string, highlightId: string | undefined) => {
-      // If we have a highlight ID, we need to find the text of that chunk.
-      // But we passed the ID, not the text. We should fetch chunks for this doc to match.
-      // Optimization: We fetch chunks once when opening doc view.
       return <AsyncDocumentRenderer fullText={fullText} highlightId={highlightId} docId={previewContent?.docId} />;
   };
 
@@ -357,9 +408,9 @@ const KnowledgePage: React.FC = () => {
                                 <h2 className="text-xl font-bold text-slate-700 mb-2">我是您的 AI 财务专家</h2>
                                 <p className="text-slate-500 max-w-sm mb-8">我已经学习了您的财务制度库，您可以问我关于报销标准、合规流程或预算规定的任何问题。</p>
                                 <div className="flex flex-wrap gap-2 justify-center max-w-lg">
-                                    {SUGGESTED_QUESTIONS.map((q,i) => (
-                                        <button key={i} onClick={() => handleSendMessage(q)} className="px-4 py-2 bg-white border border-slate-200 rounded-full text-xs font-bold text-slate-600 hover:border-indigo-500 hover:text-indigo-600 transition-all">
-                                            {q}
+                                    {dynamicSuggestions.map((q,i) => (
+                                        <button key={i} onClick={() => handleSendMessage(q)} className="flex items-center gap-1.5 px-4 py-2 bg-white border border-slate-200 rounded-full text-xs font-bold text-slate-600 hover:border-indigo-500 hover:text-indigo-600 transition-all">
+                                            <Lightbulb size={12} className="text-yellow-500"/> {q}
                                         </button>
                                     ))}
                                 </div>
@@ -415,6 +466,15 @@ const KnowledgePage: React.FC = () => {
                                 className="w-full pl-5 pr-14 py-4 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 transition-all"
                                 disabled={isChatLoading}
                             />
+                            {messages.length > 0 && (
+                                <button 
+                                    onClick={handleClearChat}
+                                    className="absolute right-12 top-1/2 -translate-y-1/2 p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                    title="清空记录"
+                                >
+                                    <RotateCcw size={16} />
+                                </button>
+                            )}
                             <button 
                                 onClick={() => handleSendMessage()}
                                 disabled={!chatInput.trim() || isChatLoading}
@@ -505,15 +565,10 @@ const AsyncDocumentRenderer = ({ fullText, highlightId, docId }: { fullText: str
     if (!targetChunk) return <div className="whitespace-pre-wrap font-mono text-sm leading-7 text-slate-600">{fullText}</div>;
 
     // Use split by the exact chunk content to insert the highlight mark
-    // Note: This relies on exact string match. If normalization differed, we fallback to just text.
-    // A robust system would store start/end offsets.
     const parts = fullText.split(targetChunk.content);
     
-    // If not found (due to slight cleaning diffs), we just return text. 
-    // Improvement: Normalize both before matching, or use approximate find. 
-    // For now, if exact match fails, we try to match the first 50 chars as a heuristic anchor.
+    // Fallback if not exact match found
     if (parts.length === 1) {
-         // Fallback heuristic: Try to find a distinctive substring
          const heuristic = targetChunk.content.substring(0, 50);
          const heuristicParts = fullText.split(heuristic);
          
@@ -529,7 +584,6 @@ const AsyncDocumentRenderer = ({ fullText, highlightId, docId }: { fullText: str
                                     className="bg-yellow-200 text-slate-900 px-1 rounded mx-0.5 border-b-2 border-yellow-400 font-bold animate-pulse shadow-sm"
                                 >
                                     {heuristic}
-                                    {/* We only highlighted the first 50 chars, let's just show the rest of the chunk as normal text immediately after if possible, or just accept the anchor highlight */}
                                     <span className="bg-yellow-50 font-normal border-none text-slate-500">...</span>
                                 </mark>
                             )}

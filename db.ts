@@ -1,6 +1,6 @@
 
 import Dexie, { Table } from 'dexie';
-import { LedgerRow, BalanceRow, ImportHistoryItem, KnowledgeDocument, KnowledgeChunk } from './types';
+import { LedgerRow, BalanceRow, ImportHistoryItem, KnowledgeDocument, KnowledgeChunk, AIQueryCache } from './types';
 
 export class FinanceDB extends Dexie {
   ledger!: Table<LedgerRow, string | number>;
@@ -8,15 +8,17 @@ export class FinanceDB extends Dexie {
   history!: Table<ImportHistoryItem, string>;
   knowledge!: Table<KnowledgeDocument, string>;
   chunks!: Table<KnowledgeChunk, string>;
+  queryCache!: Table<AIQueryCache, string>; // New Cache Table
 
   constructor() {
-    super('FinanceMasterDB_v5'); // Version bumped for chunks table
+    super('FinanceMasterDB_v6'); // Version bumped for queryCache
     (this as any).version(1).stores({
       ledger: 'id, entityId, period, subjectCode, importId, [entityId+period], [entityId+counterparty]', 
       balances: 'id, entityId, period, subjectCode, importId, [entityId+period], [entityId+counterparty]',
       history: 'id, entityId, type',
       knowledge: 'id, category, status',
-      chunks: 'id, documentId, tags' // Indexed by doc and tags
+      chunks: 'id, documentId, tags',
+      queryCache: '++id, queryText, timestamp' // Basic indexing
     });
   }
 }

@@ -50,7 +50,9 @@ export interface KnowledgeDocument {
   uploadDate: string;
   status: 'processing' | 'active' | 'error';
   // New: Knowledge Graph Entities
-  entities?: string[]; 
+  entities?: string[];
+  // New: Suggested Questions derived from content
+  suggestedQuestions?: string[];
 }
 
 // New: RAG Semantic Chunk
@@ -61,6 +63,16 @@ export interface KnowledgeChunk {
   embedding: number[];  // Vector representation
   tags: string[];       // Entities mentioned in this chunk
   sourceTitle: string;  // For citation
+}
+
+// New: AI Query Cache (Performance Optimization)
+export interface AIQueryCache {
+  id?: string;
+  queryHash: string;    // Simple hash or normalized string
+  queryText: string;
+  answer: string;
+  sources: any[];
+  timestamp: number;
 }
 
 // 1. 财务流水 (账户明细表)

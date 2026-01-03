@@ -1,5 +1,5 @@
 
-import { AnalysisResult, SystemConfig, KnowledgeChunk, LedgerRow, ComplianceResult } from '../types';
+import { AnalysisResult, SystemConfig, KnowledgeChunk, LedgerRow, ComplianceResult, AIQueryCache } from '../types';
 import { db } from '../db';
 import { GoogleGenAI } from "@google/genai";
 
@@ -205,7 +205,7 @@ export const ingestDocument = async (docId: string, title: string, content: stri
 
     // 2. Macro Understanding
     if(progressCallback) progressCallback("AI 正在提取关键财务规则...");
-    let metaData = { summary: "", rules: [] as string[], entities: [] as string[] };
+    let metaData = { summary: "", rules: [] as string[], entities: [] as string[], suggestedQuestions: [] as string[] };
     
     try {
         const summaryPrompt = `
@@ -214,8 +214,9 @@ export const ingestDocument = async (docId: string, title: string, content: stri
             1. Provide a concise summary (max 200 words).
             2. Extract list of "Key Entities" (Departments, Projects, Expense Types).
             3. Extract "Key Financial Rules" (e.g., "Meal allowance is 60 RMB", "Approval required > 5k").
+            4. Generate 3 specific questions that a user might ask about this document.
             
-            Output JSON: { "summary": string, "entities": string[], "rules": string[] }
+            Output JSON: { "summary": string, "entities": string[], "rules": string[], "suggestedQuestions": string[] }
         `;
         const contextForSummary = content.substring(0, 30000); 
         const summaryRes = await callAI(summaryPrompt + `\n\n${contextForSummary}`, "You are a senior financial auditor.", true, MODEL_FAST);
@@ -223,6 +224,7 @@ export const ingestDocument = async (docId: string, title: string, content: stri
     } catch (e) {
         console.warn("MetaData extraction failed, using defaults.", e);
         metaData.summary = content.substring(0, 200) + "...";
+        metaData.suggestedQuestions = [`${title} 的主要内容是什么？`, `${title} 中有哪些关键金额限制？`, "查看文档摘要"];
     }
 
     // 3. Batch Embeddings
@@ -258,6 +260,9 @@ export const ingestDocument = async (docId: string, title: string, content: stri
 
     await db.chunks.bulkAdd(chunks);
     
+    // Invalidate Memory Index Cache to force rebuild on next search
+    IndexManager.invalidate();
+
     return metaData;
 };
 
@@ -285,101 +290,238 @@ export const getEmbeddings = async (texts: string[], onProgress?: (processed: nu
     return Promise.all(promises);
 };
 
-// ==========================================
-// 5. Hybrid Search & RAG (The "Retrieval" Phase)
-// ==========================================
+// ==================================================================================
+// 5. HIGH-PERFORMANCE HYBRID SEARCH ENGINE (Worker + Flattened Memory)
+// ==================================================================================
 
-// --- Web Worker for Hybrid Search (Vector + Keyword) ---
-// This upgrades the search from simple Cosine to Hybrid for better accuracy with specific terms.
+// The worker script is now "Stateful". It loads data once and keeps it in memory.
+// It uses Float32Array for embeddings to maximize CPU cache locality.
 const vectorWorkerScript = `
+  let flatEmbeddings = null; // Float32Array [e1_0, e1_1, ... e1_767, e2_0...]
+  let contentList = null;    // Array of strings (for keyword search)
+  let ids = null;            // Array of Chunk IDs
+  let dim = 768;             // Embedding dimension
+
   self.onmessage = function(e) {
-    const { queryVec, queryText, chunks, topK } = e.data;
-    if (!chunks || chunks.length === 0) {
-      self.postMessage([]);
+    const { type, payload } = e.data;
+
+    // --- Initialization Phase ---
+    if (type === 'init') {
+      try {
+          flatEmbeddings = new Float32Array(payload.embeddings);
+          contentList = payload.contents;
+          ids = payload.ids;
+          // console.log('Vector Index Built in Worker:', ids.length, 'vectors');
+          self.postMessage({ type: 'init_done', success: true });
+      } catch(err) {
+          self.postMessage({ type: 'init_done', success: false, error: err.message });
+      }
       return;
     }
-    
-    // 1. Vector Similarity (Semantic)
-    function cosineSimilarity(vecA, vecB) {
-        if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
-        let dot = 0.0, normA = 0.0, normB = 0.0;
-        for (let i = 0; i < vecA.length; i++) {
-            dot += vecA[i] * vecB[i];
-            normA += vecA[i] * vecA[i];
-            normB += vecB[i] * vecB[i];
-        }
-        return dot / (Math.sqrt(normA) * Math.sqrt(normB) || 1);
-    }
 
-    // 2. Keyword Match (Lexical) - Simple scoring
-    const keywords = queryText.toLowerCase().split(/\\s+|[,.?;]/).filter(k => k.length > 1);
-    function getKeywordScore(content) {
-        if (!content) return 0;
-        const lowerContent = content.toLowerCase();
-        let matches = 0;
-        for (const k of keywords) {
-            if (lowerContent.includes(k)) matches++;
+    // --- Search Phase ---
+    if (type === 'search') {
+        const { queryVec, queryText, topK } = payload;
+        
+        if (!flatEmbeddings || !contentList || ids.length === 0) {
+            self.postMessage({ type: 'search_result', results: [] });
+            return;
         }
-        // Normalize: max 5 keywords match = 1.0
-        return Math.min(matches / 5, 1.0); 
-    }
 
-    const results = chunks
-        .map(chunk => {
-            const vecScore = chunk.embedding ? cosineSimilarity(queryVec, chunk.embedding) : 0;
-            const kwScore = getKeywordScore(chunk.content);
+        const count = ids.length;
+        const results = [];
+        
+        // 1. Prepare Keywords (Simple Tokenization)
+        const keywords = queryText.toLowerCase().split(/[\\s,;.?!]+/).filter(k => k.length > 1);
+        
+        // 2. Pre-calculate Query Norm (Loop Invariant)
+        let normA = 0.0;
+        for(let k=0; k<dim; k++) normA += queryVec[k] * queryVec[k];
+        normA = Math.sqrt(normA);
+
+        // 3. Main Search Loop (Tight Loop for Performance)
+        for (let i = 0; i < count; i++) {
+            // A. Vector Score (Cosine Similarity)
+            let dot = 0.0;
+            let normB = 0.0;
             
-            // Hybrid Score: 70% Semantic, 30% Keyword
-            // This ensures exact matches (like "5000元") get a boost over vague semantic matches
+            const offset = i * dim;
+            
+            // Unrolled loop or just standard loop. V8 optimizes this well for TypedArrays.
+            for (let j = 0; j < dim; j++) {
+                const v = flatEmbeddings[offset + j];
+                dot += v * queryVec[j];
+                normB += v * v;
+            }
+            
+            // Avoid division by zero
+            const vecScore = (normA && normB) ? (dot / (normA * Math.sqrt(normB))) : 0;
+
+            // B. Keyword Score (Lexical)
+            let kwScore = 0;
+            if (keywords.length > 0) {
+                const content = contentList[i].toLowerCase();
+                let matches = 0;
+                for (let k = 0; k < keywords.length; k++) {
+                    if (content.includes(keywords[k])) matches++;
+                }
+                kwScore = Math.min(matches / keywords.length, 1.0); // Normalize to 0-1
+            }
+
+            // C. Hybrid Re-ranking Formula
+            // 70% Semantic, 30% Exact Match
             const finalScore = (vecScore * 0.7) + (kwScore * 0.3);
-            
-            return { chunk, score: finalScore };
-        })
-        .filter(r => r.score > 0.4) // Slightly lower threshold for hybrid
-        .sort((a, b) => b.score - a.score)
-        .slice(0, topK);
 
-    self.postMessage(results);
+            if (finalScore > 0.35) {
+                results.push({ index: i, score: finalScore });
+            }
+        }
+
+        // 4. Sort and Slice
+        results.sort((a, b) => b.score - a.score);
+        const topResults = results.slice(0, topK).map(r => ({ 
+            id: ids[r.index], 
+            score: r.score 
+        }));
+        
+        self.postMessage({ type: 'search_result', results: topResults });
+    }
   };
 `;
 
-const createVectorWorker = () => {
-  const blob = new Blob([vectorWorkerScript], { type: 'application/javascript' });
-  return new Worker(URL.createObjectURL(blob));
-};
+// --- Singleton Manager for Vector Index ---
+class IndexManager {
+    private static worker: Worker | null = null;
+    private static isReady: boolean = false;
+    private static initializationPromise: Promise<void> | null = null;
+    private static lastDocCount: number = -1;
+
+    static invalidate() {
+        this.isReady = false;
+        this.lastDocCount = -1; // Force reload on next search
+    }
+
+    static async getWorker(): Promise<Worker> {
+        // Check if data changed
+        const currentCount = await db.chunks.count();
+        
+        // Initialize if first time or data changed
+        if (!this.worker || !this.isReady || currentCount !== this.lastDocCount) {
+            if (this.worker) this.worker.terminate(); // Kill old worker to free memory
+            await this.initWorker(currentCount);
+        }
+        return this.worker!;
+    }
+
+    private static async initWorker(count: number) {
+        // Prevent concurrent initializations
+        if (this.initializationPromise) return this.initializationPromise;
+
+        this.initializationPromise = (async () => {
+            console.time("IndexBuild");
+            
+            // 1. Load All Chunks (This is the heaviest I/O operation)
+            const allChunks = await db.chunks.toArray();
+            
+            // 2. Prepare Flattened Float32Array
+            const DIM = 768;
+            const totalSize = allChunks.length * DIM;
+            const flatEmbeddings = new Float32Array(totalSize);
+            const contents: string[] = [];
+            const ids: string[] = [];
+
+            for (let i = 0; i < allChunks.length; i++) {
+                const chunk = allChunks[i];
+                ids.push(chunk.id);
+                contents.push(chunk.content); // For keyword match in worker
+                
+                // Copy vector to flat array
+                if (chunk.embedding && chunk.embedding.length === DIM) {
+                    flatEmbeddings.set(chunk.embedding, i * DIM);
+                }
+            }
+
+            // 3. Create Worker
+            const blob = new Blob([vectorWorkerScript], { type: 'application/javascript' });
+            const worker = new Worker(URL.createObjectURL(blob));
+
+            // 4. Send Data (Transferable Object for Arrays to avoid copy overhead if possible)
+            // Note: Float32Array buffer is transferable.
+            await new Promise<void>((resolve, reject) => {
+                worker.onmessage = (e) => {
+                    if (e.data.type === 'init_done') {
+                        if (e.data.success) resolve();
+                        else reject(new Error(e.data.error));
+                    }
+                };
+                worker.postMessage({ 
+                    type: 'init', 
+                    payload: { 
+                        embeddings: flatEmbeddings.buffer, 
+                        contents, 
+                        ids 
+                    } 
+                }, [flatEmbeddings.buffer]); // Transfer ownership
+            });
+
+            this.worker = worker;
+            this.isReady = true;
+            this.lastDocCount = count;
+            console.timeEnd("IndexBuild");
+            
+        })();
+
+        try {
+            await this.initializationPromise;
+        } finally {
+            this.initializationPromise = null;
+        }
+    }
+}
 
 export const searchKnowledgeBase = async (query: string, topK: number = 6): Promise<{ chunk: KnowledgeChunk, score: number }[]> => {
     try {
-        const allChunks = await db.chunks.toArray();
-        if (allChunks.length === 0) return [];
+        const worker = await IndexManager.getWorker();
 
+        // 1. Embed Query
         const ai = getAiClient();
         const queryEmbRes = await ai.models.embedContent({
             model: MODEL_EMBEDDING,
             contents: { parts: [{ text: query }] },
-            config: {
-                taskType: "RETRIEVAL_QUERY"
-            }
+            config: { taskType: "RETRIEVAL_QUERY" }
         });
-        
         const queryVec = queryEmbRes.embeddings?.[0]?.values || (queryEmbRes as any).embedding?.values;
 
         if (!queryVec) return [];
 
-        return new Promise((resolve) => {
-            const worker = createVectorWorker();
-            worker.onmessage = (e) => {
-                resolve(e.data);
-                worker.terminate();
+        // 2. Perform Hybrid Search in Worker
+        const searchResults: { id: string, score: number }[] = await new Promise((resolve) => {
+            const handler = (e: MessageEvent) => {
+                if (e.data.type === 'search_result') {
+                    worker.removeEventListener('message', handler);
+                    resolve(e.data.results);
+                }
             };
-            worker.onerror = (err) => {
-                console.error("Vector worker error", err);
-                worker.terminate();
-                resolve([]);
-            };
-            // Send query text for keyword matching
-            worker.postMessage({ queryVec, queryText: query, chunks: allChunks, topK });
+            worker.addEventListener('message', handler);
+            worker.postMessage({ 
+                type: 'search', 
+                payload: { queryVec, queryText: query, topK } 
+            });
         });
+
+        // 3. Hydrate Results (Fetch full objects only for top K)
+        if (searchResults.length === 0) return [];
+        
+        const topIds = searchResults.map(r => r.id);
+        const chunks = await db.chunks.bulkGet(topIds);
+        
+        return chunks
+            .filter(c => c !== undefined)
+            .map((c, i) => ({
+                chunk: c!,
+                score: searchResults[i].score
+            }));
+
     } catch (e) {
         console.error("Search failed", e);
         return [];
@@ -411,16 +553,31 @@ export const queryKnowledgeBase = async (query: string): Promise<{ answer: strin
     };
 };
 
-// --- Streaming Support ---
+// --- Streaming Support with CACHING ---
 export async function* queryKnowledgeBaseStream(query: string) {
-    const searchResults = await searchKnowledgeBase(query, 6); // Fetch slightly more for context
+    // 1. Check Cache
+    try {
+        const cached = await db.queryCache.where({ queryText: query.trim() }).first();
+        if (cached && (Date.now() - cached.timestamp < 24 * 60 * 60 * 1000)) { // 24h Cache
+            yield { type: 'sources', sources: cached.sources };
+            yield { type: 'text', content: cached.answer };
+            console.log("Hit Local Cache");
+            return;
+        }
+    } catch (e) {
+        console.warn("Cache read failed", e);
+    }
+
+    // 2. Perform Search
+    const searchResults = await searchKnowledgeBase(query, 6); 
     
     if (searchResults.length === 0) {
         yield { type: 'text', content: "未在知识库中找到相关信息。" };
         return;
     }
 
-    yield { type: 'sources', sources: searchResults.map(r => ({ ...r.chunk, score: r.score })) };
+    const sources = searchResults.map(r => ({ ...r.chunk, score: r.score }));
+    yield { type: 'sources', sources: sources };
 
     const context = searchResults.map((r, index) => 
         `[${index + 1}] (Source: ${r.chunk.sourceTitle})\n${r.chunk.content}`
@@ -443,6 +600,8 @@ export async function* queryKnowledgeBaseStream(query: string) {
     
     const ai = getAiClient();
     
+    let fullAnswer = "";
+
     try {
         const stream = await ai.models.generateContentStream({
             model: MODEL_FAST,
@@ -456,9 +615,22 @@ export async function* queryKnowledgeBaseStream(query: string) {
         for await (const chunk of stream) {
             const text = chunk.text;
             if (text) {
+                fullAnswer += text;
                 yield { type: 'text', content: text };
             }
         }
+
+        // 3. Save to Cache after successful streaming
+        if (fullAnswer.length > 10) {
+            await db.queryCache.add({
+                queryHash: btoa(encodeURIComponent(query.trim())), // Simple hash
+                queryText: query.trim(),
+                answer: fullAnswer,
+                sources: sources,
+                timestamp: Date.now()
+            });
+        }
+
     } catch (e: any) {
         console.error("Stream error", e);
         yield { type: 'text', content: "\n[AI 连接中断]" };

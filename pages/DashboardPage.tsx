@@ -31,7 +31,7 @@ const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#64748b'
 // Asset related codes from Accounting Manual (Class 1)
 const ASSET_CODES = ['1601', '1604', '1901']; // Fixed Assets, Construction in Progress, Engineering Materials
 
-const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntities, balances, ledger, config, onNavigate, privacyMode }) => {
+const DashboardPage: React.FC<DashboardPageProps> = React.memo(({ currentEntity, allEntities, balances, ledger, config, onNavigate, privacyMode }) => {
   // --- Empty State Handling ---
   if (!balances || balances.length === 0) {
     return (
@@ -700,7 +700,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ currentEntity, allEntitie
       )}
     </div>
   );
-};
+});
 
 // ... Sub Components (ReconciliationModal, VoucherMatchingDetail, ExecutiveCard, etc.) same as before ...
 
@@ -918,7 +918,7 @@ const ReconciliationModal = ({ data, currentEntity, otherEntityId, config, onClo
         </div>
     </div>
   );
-};
+});
 
 const VoucherMatchingDetail = ({ period, currentEntityId, otherEntityId, otherEntityName, otherMatchedName, config, currentEntity, privacyMode }: any) => {
   const [loading, setLoading] = useState(false);

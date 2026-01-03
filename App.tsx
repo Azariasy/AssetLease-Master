@@ -1,18 +1,21 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import { 
   LayoutDashboard, TableProperties, ListFilter, Import, Settings, 
   Search, Bell, ChevronRight, Building2, RefreshCw, KeyRound, Check, Eye, EyeOff, Book, BrainCircuit
 } from 'lucide-react';
 import { db } from './db';
+import { PageLoading } from './components/ui/Loading';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
-// Pages
-import DashboardPage from './pages/DashboardPage';
-import BalancePage from './pages/BalancePage'; 
-import LedgerPage from './pages/LedgerPage';   
-import ImportPage from './pages/ImportPage';   
-import SettingsPage from './pages/SettingsPage';
-import KnowledgePage from './pages/KnowledgePage'; // New Page
+// Lazy Load Pages for Performance Optimization
+// This ensures heavy libraries (XLSX, PDF.js, GenAI) are only loaded when needed.
+const DashboardPage = React.lazy(() => import('./pages/DashboardPage'));
+const BalancePage = React.lazy(() => import('./pages/BalancePage'));
+const LedgerPage = React.lazy(() => import('./pages/LedgerPage'));
+const ImportPage = React.lazy(() => import('./pages/ImportPage'));
+const SettingsPage = React.lazy(() => import('./pages/SettingsPage'));
+const KnowledgePage = React.lazy(() => import('./pages/KnowledgePage'));
 
 // Types
 import { LedgerRow, BalanceRow, SystemConfig, ImportHistoryItem, Company } from './types';
@@ -42,7 +45,6 @@ const DEFAULT_CONFIG: SystemConfig = {
   // 成本费用类：54xx (营业成本), 66xx (期间费用)
   costSubjectCodes: ['5401', '5410', '5411', '5421', '6401', '6402', '6601', '6602', '6603', '5501', '5502', '5601'],
   // 资产类：16xx (固定资产/在建工程), 19xx (工程物资) - Added for CAPEX analysis
-  // These are not in the interface explicitly but used in logic derived from Manual
   
   accountSegmentIndex: 4,
   subAccountSegmentIndex: 5,
@@ -145,9 +147,12 @@ const App: React.FC = () => {
     const loadData = async () => {
       setIsLoading(true);
       try {
-        const balances = await db.balances.where('entityId').equals(currentEntityId).toArray();
-        const ledgers = await db.ledger.where('entityId').equals(currentEntityId).toArray();
-        const history = await db.history.where('entityId').equals(currentEntityId).reverse().toArray();
+        // Parallel data loading for speed
+        const [balances, ledgers, history] = await Promise.all([
+            db.balances.where('entityId').equals(currentEntityId).toArray(),
+            db.ledger.where('entityId').equals(currentEntityId).toArray(),
+            db.history.where('entityId').equals(currentEntityId).reverse().toArray()
+        ]);
         
         setBalanceData(balances);
         setLedgerData(ledgers);
@@ -196,52 +201,60 @@ const App: React.FC = () => {
       );
     }
 
-    switch (activeTab) {
-      case 'dashboard':
-        return <DashboardPage 
-            key={currentEntityId}
-            currentEntity={currentEntity} 
-            allEntities={config.entities}
-            balances={balanceData} 
-            ledger={ledgerData} 
-            config={config}
-            onNavigate={(tab) => handleNavigate(tab)}
-            privacyMode={privacyMode} 
-        />;
-      case 'balances':
-        return <BalancePage 
-          key={currentEntityId}
-          balances={balanceData} 
-          onDrillDown={(code, period) => handleNavigate('ledger', { subjectCode: code, period })}
-          config={config}
-          currentEntity={currentEntity} 
-          privacyMode={privacyMode} 
-        />;
-      case 'ledger':
-        return <LedgerPage 
-          key={currentEntityId}
-          data={ledgerData} 
-          initialFilter={drillDownFilter}
-          config={config}
-          currentEntity={currentEntity}
-          privacyMode={privacyMode} 
-        />;
-      case 'import':
-        return <ImportPage 
-          key={currentEntityId}
-          currentEntity={currentEntity}
-          onDataChanged={handleRefreshData}
-          config={config}
-          importHistory={importHistory}
-          onConfigUpdate={setConfig}
-        />;
-      case 'knowledge':
-        return <KnowledgePage />;
-      case 'settings':
-        return <SettingsPage config={config} onSave={(newConfig) => setConfig(newConfig)} />; 
-      default:
-        return <DashboardPage key={currentEntityId} currentEntity={currentEntity} allEntities={config.entities} balances={balanceData} ledger={ledgerData} config={config} onNavigate={(tab) => handleNavigate(tab)} privacyMode={privacyMode} />;
-    }
+    return (
+        <ErrorBoundary>
+            <Suspense fallback={<PageLoading message="正在加载模块..." />}>
+                {activeTab === 'dashboard' && (
+                    <DashboardPage 
+                        key={currentEntityId}
+                        currentEntity={currentEntity} 
+                        allEntities={config.entities}
+                        balances={balanceData} 
+                        ledger={ledgerData} 
+                        config={config}
+                        onNavigate={(tab) => handleNavigate(tab)}
+                        privacyMode={privacyMode} 
+                    />
+                )}
+                {activeTab === 'balances' && (
+                    <BalancePage 
+                        key={currentEntityId}
+                        balances={balanceData} 
+                        onDrillDown={(code, period) => handleNavigate('ledger', { subjectCode: code, period })}
+                        config={config}
+                        currentEntity={currentEntity} 
+                        privacyMode={privacyMode} 
+                    />
+                )}
+                {activeTab === 'ledger' && (
+                    <LedgerPage 
+                        key={currentEntityId}
+                        data={ledgerData} 
+                        initialFilter={drillDownFilter}
+                        config={config}
+                        currentEntity={currentEntity}
+                        privacyMode={privacyMode} 
+                    />
+                )}
+                {activeTab === 'import' && (
+                    <ImportPage 
+                        key={currentEntityId}
+                        currentEntity={currentEntity}
+                        onDataChanged={handleRefreshData}
+                        config={config}
+                        importHistory={importHistory}
+                        onConfigUpdate={setConfig}
+                    />
+                )}
+                {activeTab === 'knowledge' && (
+                    <KnowledgePage />
+                )}
+                {activeTab === 'settings' && (
+                    <SettingsPage config={config} onSave={(newConfig) => setConfig(newConfig)} />
+                )}
+            </Suspense>
+        </ErrorBoundary>
+    );
   };
 
   const getHeaderTitle = () => {
@@ -261,14 +274,14 @@ const App: React.FC = () => {
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden">
       {/* Sidebar */}
-      <aside className="w-64 bg-slate-900 text-slate-300 flex flex-col shadow-2xl z-10">
+      <aside className="w-64 bg-slate-900 text-slate-300 flex flex-col shadow-2xl z-10 shrink-0">
         <div className="p-6 flex items-center gap-3 text-white border-b border-slate-800/50">
           <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center shadow-lg">
             <span className="font-bold text-lg">F</span>
           </div>
           <div>
             <h1 className="font-bold text-sm tracking-wide">Finance Master</h1>
-            <p className="text-[10px] text-slate-500 font-medium">财务数据中心 v4.6</p>
+            <p className="text-[10px] text-slate-500 font-medium">财务数据中心 v5.0</p>
           </div>
         </div>
 
@@ -319,7 +332,7 @@ const App: React.FC = () => {
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0 bg-slate-50 relative">
         {/* Header */}
-        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 sticky top-0 z-10">
+        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 sticky top-0 z-10 shrink-0">
           <div className="flex items-center gap-4">
             <h2 className="text-xl font-bold text-slate-800">
               {getHeaderTitle()}
@@ -363,8 +376,8 @@ const App: React.FC = () => {
         </header>
 
         {/* Scrollable Content Area */}
-        <div className="flex-1 overflow-auto p-8">
-          <div className="max-w-7xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+        <div className="flex-1 overflow-auto p-8 relative">
+          <div className="max-w-7xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500 h-full">
             {renderContent()}
           </div>
         </div>

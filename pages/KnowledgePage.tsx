@@ -1,10 +1,12 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Upload, FileText, CheckCircle2, Trash2, BrainCircuit, Loader2, FileUp, Sparkles, X, Users, Quote, Send, Bot, BookOpenCheck, ChevronRight, Layers, ExternalLink, Box, Lightbulb, RotateCcw } from 'lucide-react';
+import { Upload, FileText, CheckCircle2, Trash2, BrainCircuit, Loader2, FileUp, Sparkles, X, Users, Quote, Send, Bot, BookOpenCheck, ChevronRight, Layers, ExternalLink, Box, Lightbulb, RotateCcw, Copy, Check, Search } from 'lucide-react';
 import { db } from '../db';
 import { KnowledgeDocument, KnowledgeChunk } from '../types';
 import { ingestDocument, queryKnowledgeBaseStream, parseDocumentWithAI, searchKnowledgeBase, getDocumentChunks } from '../services/geminiService';
 import { readFileForAI } from '../utils/fileParser';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 interface ChatMessage {
     id: string;
@@ -21,32 +23,82 @@ const DEFAULT_SUGGESTIONS = [
     "固定资产折旧年限规定？"
 ];
 
-const CitationRenderer = ({ text, sources, onSourceClick }: { text: string, sources?: any[], onSourceClick: (idx: number) => void }) => {
-    if (!text) return null;
-    const parts = text.split(/(\[\d+\])/g);
+const MarkdownRenderer = ({ content, onSourceClick }: { content: string, onSourceClick: (idx: number) => void }) => {
+    // 1. Pre-process content: Convert [1] -> [1](#source-1)
+    // Using hash links ensures standard markdown parsers treat them as internal links, 
+    // which we can then intercept easily.
+    const processedContent = useMemo(() => {
+        if (!content) return '';
+        // Match [1], [ 1 ], 【1】 patterns globally and convert to internal anchor format
+        return content.replace(/\[\s*(\d+)\s*\]/g, '[$1](#source-$1)')
+                      .replace(/【\s*(\d+)\s*】/g, '[$1](#source-$1)')
+                      .replace(/\（\s*(\d+)\s*\）/g, '[$1](#source-$1)'); 
+    }, [content]);
 
     return (
-        <span>
-            {parts.map((part, i) => {
-                const match = part.match(/^\[(\d+)\]$/);
-                if (match) {
-                    const index = parseInt(match[1]) - 1; 
-                    if (sources && sources[index]) {
+        <ReactMarkdown 
+            remarkPlugins={[remarkGfm]}
+            className="prose prose-sm prose-slate max-w-none break-words"
+            components={{
+                a: ({ node, href, children, ...props }) => {
+                    // 2. Intercept Citation Links (Check for our specific hash pattern)
+                    if (href && href.startsWith('#source-')) {
+                        // Extract index from "#source-1"
+                        const indexStr = href.replace('#source-', '');
+                        const index = parseInt(indexStr) - 1;
+                        
                         return (
                             <button
-                                key={i}
-                                onClick={() => onSourceClick(index)}
-                                className="inline-flex items-center justify-center w-4 h-4 ml-0.5 -mt-2 text-[9px] font-bold text-indigo-600 bg-indigo-100 rounded-full hover:bg-indigo-600 hover:text-white transition-colors align-top cursor-pointer border border-indigo-200"
-                                title={`点击查看来源: ${sources[index].sourceTitle}`}
+                                type="button"
+                                onClick={(e) => {
+                                    e.preventDefault(); 
+                                    e.stopPropagation();
+                                    if (!isNaN(index) && index >= 0) {
+                                        onSourceClick(index);
+                                    }
+                                }}
+                                className="inline-flex items-center justify-center w-4 h-4 mx-0.5 text-[9px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-200 rounded-full hover:bg-indigo-600 hover:text-white transition-all align-top -mt-1 cursor-pointer select-none shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                                title="点击查看来源原文"
                             >
-                                {match[1]}
+                                {children}
                             </button>
                         );
                     }
+                    
+                    // 3. Regular Links (External) - Open in new tab
+                    return (
+                        <a 
+                            href={href} 
+                            target="_blank" 
+                            rel="noopener noreferrer" 
+                            className="text-blue-600 hover:underline inline-flex items-center gap-0.5" 
+                            onClick={(e) => e.stopPropagation()}
+                            {...props}
+                        >
+                            {children} <ExternalLink size={10} />
+                        </a>
+                    );
+                },
+                table: ({node, ...props}) => <div className="overflow-x-auto my-2"><table className="min-w-full border border-slate-200 rounded-lg text-xs" {...props} /></div>,
+                thead: ({node, ...props}) => <thead className="bg-slate-50" {...props} />,
+                th: ({node, ...props}) => <th className="p-2 text-left font-bold text-slate-700 border-b border-slate-200" {...props} />,
+                td: ({node, ...props}) => <td className="p-2 border-b border-slate-100 text-slate-600" {...props} />,
+                code: ({node, className, children, ...props}) => { 
+                    const match = /language-(\w+)/.exec(className || '')
+                    return !className ? (
+                        <code className="bg-slate-100 text-slate-700 px-1 py-0.5 rounded font-mono text-xs" {...props}>
+                            {children}
+                        </code>
+                    ) : (
+                        <code className={className} {...props}>
+                            {children}
+                        </code>
+                    )
                 }
-                return <span key={i}>{part}</span>;
-            })}
-        </span>
+            }}
+        >
+            {processedContent}
+        </ReactMarkdown>
     );
 };
 
@@ -67,11 +119,14 @@ const KnowledgePage: React.FC = () => {
   // Chat State with Persistence
   const [chatInput, setChatInput] = useState(() => sessionStorage.getItem(STORAGE_KEY_INPUT) || '');
   const [isChatLoading, setIsChatLoading] = useState(false);
+  
+  // Initialize messages from sessionStorage
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
       try {
           const saved = sessionStorage.getItem(STORAGE_KEY_HISTORY);
           return saved ? JSON.parse(saved) : [];
       } catch (e) {
+          console.warn("Failed to parse chat history", e);
           return [];
       }
   });
@@ -94,12 +149,11 @@ const KnowledgePage: React.FC = () => {
     loadDocuments();
   }, []);
 
-  // Persist Messages (Strip heavy embeddings)
+  // --- Persistence Logic ---
   useEffect(() => {
       const safeHistory = messages.map(msg => ({
           ...msg,
           sources: msg.sources?.map(s => {
-              // Create a shallow copy and remove embedding array to save space
               const { embedding, ...rest } = s; 
               return rest as any;
           })
@@ -107,7 +161,6 @@ const KnowledgePage: React.FC = () => {
       sessionStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(safeHistory));
   }, [messages]);
 
-  // Persist Input
   useEffect(() => {
       sessionStorage.setItem(STORAGE_KEY_INPUT, chatInput);
   }, [chatInput]);
@@ -120,7 +173,6 @@ const KnowledgePage: React.FC = () => {
     }
   }, [messages, activeTab]);
 
-  // SCROLL LOGIC
   useEffect(() => {
       if (previewContent?.highlightChunkId && previewRef.current) {
           setTimeout(() => {
@@ -145,23 +197,14 @@ const KnowledgePage: React.FC = () => {
     }
   };
 
-  // Compute Dynamic Suggestions based on loaded docs
+  // Compute Dynamic Suggestions (Shuffled & Randomized)
   const dynamicSuggestions = useMemo(() => {
       if (documents.length === 0) return DEFAULT_SUGGESTIONS;
-      // Gather suggested questions from the 3 most recent docs
-      const recentDocs = documents.slice(0, 3);
-      const suggestions: string[] = [];
-      recentDocs.forEach(d => {
-          if (d.suggestedQuestions && d.suggestedQuestions.length > 0) {
-              suggestions.push(d.suggestedQuestions[0]); // Take top question from each
-          }
-      });
-      // Fill remaining slots with defaults if needed, max 3
-      let final = [...suggestions];
-      if (final.length < 3) {
-          final = [...final, ...DEFAULT_SUGGESTIONS.slice(0, 3 - final.length)];
-      }
-      return final;
+      const allQuestions = documents.flatMap(d => d.suggestedQuestions || []).filter(q => q && q.length > 4);
+      if (allQuestions.length === 0) return DEFAULT_SUGGESTIONS;
+      const shuffled = [...allQuestions].sort(() => 0.5 - Math.random());
+      const unique = Array.from(new Set(shuffled)).slice(0, 4);
+      return unique.length > 0 ? unique : DEFAULT_SUGGESTIONS;
   }, [documents]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -190,7 +233,6 @@ const KnowledgePage: React.FC = () => {
         setProcessStatus("AI 正在理解文档并构建向量索引...");
         const docId = `doc-${Date.now()}`;
         
-        // Ingest now returns suggestedQuestions
         const { summary, entities, rules, suggestedQuestions } = await ingestDocument(docId, file.name, fullText, (stage) => setProcessStatus(stage));
         
         const enrichedSummary = summary + (rules && rules.length > 0 ? "\n\n[关键规则]: " + rules.slice(0,3).join("; ") : "");
@@ -303,6 +345,24 @@ const KnowledgePage: React.FC = () => {
 
   const renderHighlightedContent = (fullText: string, highlightId: string | undefined) => {
       return <AsyncDocumentRenderer fullText={fullText} highlightId={highlightId} docId={previewContent?.docId} />;
+  };
+
+  const CopyButton = ({ text }: { text: string }) => {
+      const [copied, setCopied] = useState(false);
+      const handleCopy = () => {
+          navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+      };
+      return (
+          <button 
+            onClick={handleCopy} 
+            className="p-1.5 text-slate-400 hover:text-indigo-600 bg-white/50 hover:bg-white rounded-lg transition-all"
+            title="复制回答"
+          >
+              {copied ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
+          </button>
+      );
   };
 
   return (
@@ -422,29 +482,60 @@ const KnowledgePage: React.FC = () => {
                                 <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 shadow-sm ${msg.role === 'user' ? 'bg-white text-slate-600' : 'bg-gradient-to-br from-indigo-600 to-violet-600 text-white'}`}>
                                     {msg.role === 'user' ? <Users size={20} /> : <Bot size={20} />}
                                 </div>
-                                <div className="max-w-[85%] space-y-2">
-                                    <div className={`p-5 rounded-2xl text-sm leading-relaxed shadow-sm ${msg.role === 'user' ? 'bg-slate-800 text-white rounded-tr-none' : 'bg-white border border-slate-100 rounded-tl-none text-slate-700'}`}>
-                                        <CitationRenderer 
-                                            text={msg.content} 
-                                            sources={msg.sources}
-                                            onSourceClick={(idx) => msg.sources && msg.sources[idx] && openSourcePreview(msg.sources[idx])}
-                                        />
+                                <div className="max-w-[85%] space-y-2 group">
+                                    <div className={`p-5 rounded-2xl text-sm leading-relaxed shadow-sm relative ${msg.role === 'user' ? 'bg-slate-800 text-white rounded-tr-none' : 'bg-white border border-slate-100 rounded-tl-none text-slate-700'}`}>
+                                        
+                                        {msg.role === 'assistant' && (
+                                            <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                <CopyButton text={msg.content} />
+                                            </div>
+                                        )}
+
+                                        {msg.role === 'assistant' ? (
+                                            <MarkdownRenderer 
+                                                content={msg.content} 
+                                                onSourceClick={(idx) => msg.sources && msg.sources[idx] && openSourcePreview(msg.sources[idx])} 
+                                            />
+                                        ) : (
+                                            <p className="whitespace-pre-wrap">{msg.content}</p>
+                                        )}
+
                                         {msg.role === 'assistant' && !msg.content && isChatLoading && (
-                                            <span className="animate-pulse">Thinking...</span>
+                                            <div className="flex gap-1 py-1">
+                                                <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce"></div>
+                                                <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce delay-75"></div>
+                                                <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce delay-150"></div>
+                                            </div>
                                         )}
                                     </div>
                                     
+                                    {/* Sources displayed AFTER the bubble content wrapper for better flow, or bottom of bubble */}
                                     {msg.sources && msg.sources.length > 0 && (
-                                        <div className="flex flex-wrap gap-2 pl-2">
-                                            <div className="text-[10px] text-slate-400 font-bold uppercase w-full mb-1">参考资料来源</div>
+                                        <div className="flex flex-wrap gap-2 pl-2 mt-1">
+                                            {/* Status Header - REMOVED CONDITIONAL TEXT to avoid "Reading" stuck state */}
+                                            <div className="text-[10px] text-slate-400 font-bold uppercase w-full flex items-center gap-1.5 mb-1">
+                                                <BookOpenCheck size={12} className="text-emerald-500" />
+                                                已检索到 {msg.sources.length} 处相关参考资料
+                                            </div>
+                                            
                                             {msg.sources.map((src, i) => (
                                                 <button 
                                                     key={i}
                                                     onClick={() => openSourcePreview(src)}
-                                                    className="flex items-center gap-1.5 px-2 py-1 bg-white hover:bg-indigo-50 border border-slate-200 hover:border-indigo-200 rounded text-[10px] text-slate-500 hover:text-indigo-600 transition-all group"
+                                                    // Show Snippet Preview on Hover for context differentiation
+                                                    title={src.content.substring(0, 300) + '...'}
+                                                    className="flex items-center gap-1.5 px-2.5 py-1.5 bg-white hover:bg-indigo-50 border border-slate-200 hover:border-indigo-300 rounded-lg text-[10px] text-slate-600 hover:text-indigo-700 transition-all group shadow-sm max-w-[200px]"
                                                 >
-                                                    <span className="font-mono font-bold bg-slate-100 text-slate-500 group-hover:bg-indigo-100 group-hover:text-indigo-600 rounded px-1">{i + 1}</span>
-                                                    <span className="truncate max-w-[100px]">{src.sourceTitle}</span>
+                                                    <span className="font-mono font-bold bg-slate-100 text-slate-500 group-hover:bg-indigo-100 group-hover:text-indigo-600 rounded px-1 min-w-[20px] text-center">
+                                                        {i + 1}
+                                                    </span>
+                                                    <div className="flex flex-col text-left overflow-hidden">
+                                                        <span className="truncate font-bold">{src.sourceTitle}</span>
+                                                        {/* Optional: Show small hash ID to visually distinguish same-doc chunks */}
+                                                        <span className="text-[9px] text-slate-400 opacity-60">
+                                                            段落 #{src.id.split('-').pop()}
+                                                        </span>
+                                                    </div>
                                                 </button>
                                             ))}
                                         </div>
@@ -469,7 +560,7 @@ const KnowledgePage: React.FC = () => {
                             {messages.length > 0 && (
                                 <button 
                                     onClick={handleClearChat}
-                                    className="absolute right-12 top-1/2 -translate-y-1/2 p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                    className="absolute right-14 top-1/2 -translate-y-1/2 p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
                                     title="清空记录"
                                 >
                                     <RotateCcw size={16} />

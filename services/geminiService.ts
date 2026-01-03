@@ -1,7 +1,6 @@
-
 import { AnalysisResult, SystemConfig, KnowledgeChunk, LedgerRow, ComplianceResult, AIQueryCache } from '../types';
 import { db } from '../db';
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 
 // ==========================================
 // 1. API Configuration & Clients
@@ -208,13 +207,17 @@ export const ingestDocument = async (docId: string, title: string, content: stri
     let metaData = { summary: "", rules: [] as string[], entities: [] as string[], suggestedQuestions: [] as string[] };
     
     try {
+        // UPDATED PROMPT FOR CHINESE OUTPUT
         const summaryPrompt = `
             Analyze this financial/business document. 
             Context: The company deals with Real Estate Assets (Houses/Buildings) and Leasing.
+            
+            IMPORTANT: Output must be in **Simplified Chinese (简体中文)**.
+            
             1. Provide a concise summary (max 200 words).
             2. Extract list of "Key Entities" (Departments, Projects, Expense Types).
             3. Extract "Key Financial Rules" (e.g., "Meal allowance is 60 RMB", "Approval required > 5k").
-            4. Generate 3 specific questions that a user might ask about this document.
+            4. Generate 3 specific questions that a user might ask about this document (in Chinese).
             
             Output JSON: { "summary": string, "entities": string[], "rules": string[], "suggestedQuestions": string[] }
         `;
@@ -223,7 +226,7 @@ export const ingestDocument = async (docId: string, title: string, content: stri
         metaData = JSON.parse(cleanJsonString(summaryRes));
     } catch (e) {
         console.warn("MetaData extraction failed, using defaults.", e);
-        metaData.summary = content.substring(0, 200) + "...";
+        metaData.summary = "文档解析成功，但摘要生成失败。";
         metaData.suggestedQuestions = [`${title} 的主要内容是什么？`, `${title} 中有哪些关键金额限制？`, "查看文档摘要"];
     }
 
@@ -533,16 +536,16 @@ export const getDocumentChunks = async (documentId: string): Promise<KnowledgeCh
 };
 
 export const queryKnowledgeBase = async (query: string): Promise<{ answer: string, sources: any[] }> => {
-    const searchResults = await searchKnowledgeBase(query, 5); 
+    const searchResults = await searchKnowledgeBase(query, 4); 
     if (searchResults.length === 0) {
         return { answer: "未在知识库中找到相关信息。", sources: [] };
     }
 
     const context = searchResults.map((r, index) => 
-        `[${index + 1}] (Source: ${r.chunk.sourceTitle})\n${r.chunk.content}`
+        `[[CITATION_ID:${index + 1}]]\nSOURCE: ${r.chunk.sourceTitle}\nCONTENT: ${r.chunk.content}`
     ).join("\n\n");
 
-    const systemInstruction = `You are a financial assistant. Answer based on context. Cite sources using [1], [2].`;
+    const systemInstruction = `You are a financial assistant. Answer based on context in Simplified Chinese. Cite sources using [1], [2].`;
     const prompt = `Context:\n${context}\n\nQuestion: ${query}`;
     
     const answer = await callAI(prompt, systemInstruction, false, MODEL_FAST);
@@ -568,8 +571,8 @@ export async function* queryKnowledgeBaseStream(query: string) {
         console.warn("Cache read failed", e);
     }
 
-    // 2. Perform Search
-    const searchResults = await searchKnowledgeBase(query, 6); 
+    // 2. Perform Search (Reduced to 4 to minimize hallucination)
+    const searchResults = await searchKnowledgeBase(query, 4); 
     
     if (searchResults.length === 0) {
         yield { type: 'text', content: "未在知识库中找到相关信息。" };
@@ -579,24 +582,27 @@ export async function* queryKnowledgeBaseStream(query: string) {
     const sources = searchResults.map(r => ({ ...r.chunk, score: r.score }));
     yield { type: 'sources', sources: sources };
 
+    // Explicitly Label Context for AI
     const context = searchResults.map((r, index) => 
-        `[${index + 1}] (Source: ${r.chunk.sourceTitle})\n${r.chunk.content}`
+        `[[CITATION_ID:${index + 1}]]\nSOURCE: ${r.chunk.sourceTitle}\nCONTENT: ${r.chunk.content}`
     ).join("\n\n");
 
+    // UPDATED SYSTEM INSTRUCTION FOR STRICT CITATIONS
     const systemInstruction = `
         You are a highly precise Financial Compliance Assistant.
         
-        STRICT CITATION RULES:
-        1. Answer the user's question based ONLY on the provided Context.
-        2. Every key statement MUST have a citation in the format [x] at the end of the sentence.
-        3. Do not make up information. If the answer is not in the context, say you don't know.
-        4. Refer to the sources by their number [1], [2], etc.
+        CRITICAL RULES:
+        1. Answer ONLY based on the provided Context.
+        2. ALWAYS Answer in **Simplified Chinese (简体中文)**.
+        3. CITATIONS: When using information from a block labeled [[CITATION_ID:x]], you MUST append [x] to the end of the sentence.
+        4. ACCURACY: Do not invent citation numbers. If you use information from Context 1, label it [1]. If from Context 2, label it [2].
+        5. FORMAT: Use standard brackets [1]. Do not use markdown links like [1](...).
         
-        Example Answer:
-        The travel allowance for meals is 60 RMB per day [1]. However, in Beijing, this limit is increased to 80 RMB [2].
+        Context Provided:
+        ${context}
     `;
     
-    const prompt = `Context:\n${context}\n\nQuestion: ${query}`;
+    const prompt = `Question: ${query}`;
     
     const ai = getAiClient();
     
@@ -608,7 +614,7 @@ export async function* queryKnowledgeBaseStream(query: string) {
             contents: prompt,
             config: {
                 systemInstruction: systemInstruction,
-                temperature: 0.2
+                temperature: 0.1 // Lower temp for more deterministic behavior
             }
         });
 
@@ -676,7 +682,23 @@ export const generateChatResponse = async (history: any[], query: string, stats?
         User Question: ${query}
     `;
 
-    return await callAI(prompt, systemPrompt, false, MODEL_REASONING);
+    const ai = getAiClient();
+    try {
+        const response = await ai.models.generateContent({
+             model: MODEL_FAST,
+             contents: prompt,
+             config: {
+                 systemInstruction: systemPrompt,
+                 // Enable Thinking for complex reasoning (limited to 2k tokens to start fast)
+                 thinkingConfig: { thinkingBudget: 1024 },
+                 temperature: 0.2
+             }
+        });
+        return response.text || "AI 无法生成回答。";
+    } catch(e) {
+        // Fallback if Thinking is not supported or errors
+        return await callAI(prompt, systemPrompt, false, MODEL_FAST);
+    }
 };
 
 export const checkLedgerCompliance = async (rows: LedgerRow[]): Promise<ComplianceResult[]> => { 
@@ -705,14 +727,36 @@ export const checkLedgerCompliance = async (rows: LedgerRow[]): Promise<Complian
         })))}
 
         Task: Identify potentially non-compliant transactions based on the policies above.
-        Output JSON Array: [{ "rowId": "...", "voucherNo": "...", "summary": "...", "issue": "Specific violation reason referencing policy if possible", "severity": "high"|"medium", "policySource": "Policy Title or General Rule" }]
-        Only output found issues. If none, return [].
+        Only output found issues. If none, return empty array.
     `;
 
+    // Use Schema for 100% Reliable JSON
+    const ai = getAiClient();
     try {
-        const res = await callAI(auditPrompt, "JSON Auditor", true, MODEL_LARGE); 
-        const results = JSON.parse(cleanJsonString(res));
-        return results;
+        const response = await ai.models.generateContent({
+            model: MODEL_FAST,
+            contents: auditPrompt,
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: Type.ARRAY,
+                    items: {
+                        type: Type.OBJECT,
+                        properties: {
+                            rowId: { type: Type.STRING },
+                            voucherNo: { type: Type.STRING },
+                            summary: { type: Type.STRING },
+                            issue: { type: Type.STRING },
+                            severity: { type: Type.STRING, enum: ["high", "medium", "low"] },
+                            policySource: { type: Type.STRING }
+                        },
+                        required: ["rowId", "voucherNo", "issue"]
+                    }
+                }
+            }
+        });
+        const jsonStr = response.text?.trim() || "[]";
+        return JSON.parse(jsonStr);
     } catch (e) {
         console.error("Compliance Check Failed", e);
         return [];

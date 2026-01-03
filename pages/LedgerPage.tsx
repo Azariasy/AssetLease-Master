@@ -351,7 +351,7 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
                                     onClick={() => handleChatSubmit(s)}
                                     className="flex items-center gap-1 px-3 py-1 bg-indigo-50 border border-indigo-100 text-indigo-600 rounded-full text-xs whitespace-nowrap hover:bg-indigo-100 transition-colors"
                                   >
-                                      <Lightbulb size={12} /> {s}
+                                      <Lightbulb size={12} className="text-yellow-500"/> {s}
                                   </button>
                               ))}
                           </div>

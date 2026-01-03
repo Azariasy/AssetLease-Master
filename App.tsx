@@ -77,8 +77,7 @@ const DEFAULT_CONFIG: SystemConfig = {
     "260008": "党委办公室（党群工作部/党风廉政办公室）",
     "260028": "教育产品二中心"
   },
-  entities: DEFAULT_COMPANIES,
-  aiApiKey: '' // Default empty
+  entities: DEFAULT_COMPANIES
 };
 
 const App: React.FC = () => {
@@ -251,13 +250,13 @@ const App: React.FC = () => {
       case 'balances': return '科目余额表';
       case 'ledger': return '明细账查询';
       case 'import': return '数据导入';
-      case 'knowledge': return 'AI 知识库 (DeepSeek)';
+      case 'knowledge': return 'AI 知识库 (Gemini)';
       case 'settings': return '系统配置';
       default: return '首页';
     }
   };
 
-  const hasApiKey = config.aiApiKey && config.aiApiKey.length > 10;
+  const hasApiKey = !!process.env.API_KEY;
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden">
@@ -269,7 +268,7 @@ const App: React.FC = () => {
           </div>
           <div>
             <h1 className="font-bold text-sm tracking-wide">Finance Master</h1>
-            <p className="text-[10px] text-slate-500 font-medium">财务数据中心 v4.5</p>
+            <p className="text-[10px] text-slate-500 font-medium">财务数据中心 v4.6</p>
           </div>
         </div>
 
@@ -342,12 +341,12 @@ const App: React.FC = () => {
 
             {/* API Key Status Indicator */}
             {hasApiKey ? (
-                <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-slate-100 rounded-full border border-slate-200" title="DeepSeek 引擎已就绪">
+                <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-slate-100 rounded-full border border-slate-200" title="Gemini 引擎已就绪">
                     <div className="w-2 h-2 rounded-full bg-emerald-500"></div>
-                    <span className="text-[10px] font-bold text-slate-500">DeepSeek Ready</span>
+                    <span className="text-[10px] font-bold text-slate-500">AI Ready</span>
                 </div>
             ) : (
-                <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-red-50 rounded-full border border-red-100 cursor-pointer hover:bg-red-100" onClick={() => setActiveTab('settings')}>
+                <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-red-50 rounded-full border border-red-100" title="环境 Key 缺失">
                     <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
                     <span className="text-[10px] font-bold text-red-500">AI 未配置</span>
                 </div>

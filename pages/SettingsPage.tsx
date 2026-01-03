@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { Save, LayoutTemplate, Building2, Tag, Plus, X, BookOpen, ArrowRightLeft, HelpCircle, Bot, Eye, EyeOff, Database, Download, Upload, Loader2, RefreshCw, Trash2, AlertOctagon } from 'lucide-react';
 import { SystemConfig } from '../types';
@@ -200,7 +199,7 @@ const SettingsPage = ({ config, onSave }: SettingsPageProps) => {
       {/* Header */}
       <div>
         <h2 className="text-2xl font-bold text-slate-800">系统参数配置</h2>
-        <p className="text-slate-500 mt-1">配置财务科目的识别规则、部门字典、关联方逻辑以及 AI 引擎。</p>
+        <p className="text-slate-500 mt-1">配置财务科目的识别规则、部门字典、关联方逻辑。</p>
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
@@ -250,54 +249,6 @@ const SettingsPage = ({ config, onSave }: SettingsPageProps) => {
             </div>
         </div>
 
-        {/* 0.5 AI Engine Status (DeepSeek Configuration) */}
-        <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm space-y-6 relative overflow-hidden">
-            <div className="flex items-center gap-3 border-b border-slate-100 pb-4 relative z-10">
-                <div className="p-2 bg-blue-50 text-blue-600 rounded-lg">
-                    <Bot size={20} />
-                </div>
-                <div>
-                    <h3 className="font-bold text-slate-800">DeepSeek AI 引擎配置</h3>
-                    <p className="text-xs text-slate-400">使用深度求索 (DeepSeek V3) 进行智能分析</p>
-                </div>
-            </div>
-            
-            <div className="relative z-10 space-y-4">
-                <div className="space-y-2">
-                    <label className="text-sm font-bold text-slate-700">DeepSeek API Key</label>
-                    <div className="flex items-center gap-2">
-                        <input 
-                            type="password"
-                            value={formData.aiApiKey || ''}
-                            onChange={(e) => setFormData(prev => ({...prev, aiApiKey: e.target.value}))}
-                            placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
-                            className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:border-blue-500 font-mono"
-                        />
-                    </div>
-                </div>
-
-                <div className="flex items-center gap-4">
-                    {formData.aiApiKey ? (
-                        <div className="flex items-center gap-2 text-emerald-600 bg-emerald-50 px-3 py-2 rounded-lg border border-emerald-100">
-                            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                            <span className="text-sm font-bold">Key 已配置</span>
-                        </div>
-                    ) : (
-                        <div className="flex items-center gap-2 text-red-600 bg-red-50 px-3 py-2 rounded-lg border border-red-100">
-                            <span className="w-2 h-2 rounded-full bg-red-500"></span>
-                            <span className="text-sm font-bold">未配置</span>
-                        </div>
-                    )}
-                    <span className="text-xs text-slate-400 flex-1">
-                        AI 知识库和向量索引是<span className="text-blue-600 font-bold">共享资源</span>。更换 AI 引擎后，建议清空旧的向量数据并重新学习文档。
-                    </span>
-                </div>
-            </div>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
-        
         {/* 1. 科目识别规则 (Financial Definitions) */}
         <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm space-y-6">
             <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
@@ -355,7 +306,10 @@ const SettingsPage = ({ config, onSave }: SettingsPageProps) => {
                 </div>
             </div>
         </div>
+      </div>
 
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
+        
         {/* 2. 部门字典 (Department Map) */}
         <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm space-y-6 flex flex-col">
             <div className="flex items-center gap-3 border-b border-slate-100 pb-4">
@@ -410,7 +364,6 @@ const SettingsPage = ({ config, onSave }: SettingsPageProps) => {
                 </button>
             </div>
         </div>
-      </div>
 
       {/* 3. 关联方互认 (Entity Interconnection) */}
       <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-sm space-y-6">
@@ -467,6 +420,7 @@ const SettingsPage = ({ config, onSave }: SettingsPageProps) => {
                 </div>
             ))}
         </div>
+      </div>
       </div>
 
       {/* Save Bar */}

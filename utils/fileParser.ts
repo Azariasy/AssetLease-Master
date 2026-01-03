@@ -1,46 +1,147 @@
 
-import * as mammoth from 'mammoth';
-import * as pdfjsLib from 'pdfjs-dist/build/pdf';
+// @ts-ignore
+import mammoth from 'mammoth';
+// @ts-ignore
+import * as pdfjsProxy from 'pdfjs-dist';
 
-// Handle ESM import structure (sometimes exports are under 'default' depending on bundler/cdn)
-const pdf = (pdfjsLib as any).default || pdfjsLib;
+// Handle ESM/CJS interop for PDF.js
+const pdfjsLib = (pdfjsProxy as any).default || pdfjsProxy;
 
-// 解决 ESM 环境下 worker 配置问题
-// Ensure we use the correct worker version matching the library
-if (typeof window !== 'undefined' && 'Worker' in window) {
-  // Use specific version from esm.sh to match imports in index.html
-  if (pdf && pdf.GlobalWorkerOptions) {
-      // Use CDNJS for the worker script as it provides a classic script format compatible with standard Worker loading
-      // esm.sh returns an ES module which causes "importScripts" or syntax errors in standard worker contexts
-      pdf.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-  }
+// Set worker source for PDF.js using a stable CDN (cdnjs) that serves the classic script format
+// esm.sh serves modules by default which causes importScripts to fail in the worker
+// CRITICAL: Version MUST match package.json or importmap exactly (3.11.174)
+if (pdfjsLib.GlobalWorkerOptions) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 }
 
-export const extractTextFromFile = async (file: File, onProgress?: (percent: number, msg: string) => void): Promise<string> => {
-  const fileType = file.name.split('.').pop()?.toLowerCase();
+/**
+ * 现代文档解析器 (Modern File Parser) - Robust Version
+ */
 
+export interface ParsedFile {
+    content: string; // 文本内容 或 Base64 字符串
+    mimeType: string;
+    isBinary: boolean;
+}
+
+// 安全的 Chunk Size (32KB)
+const CHUNK_SIZE = 0x8000; 
+
+const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i += CHUNK_SIZE) {
+    const chunk = bytes.subarray(i, i + CHUNK_SIZE);
+    // @ts-ignore
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
+};
+
+// Local PDF Extraction
+const extractPdfText = async (file: File): Promise<string> => {
+    try {
+        const arrayBuffer = await file.arrayBuffer();
+        const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+        const pdf = await loadingTask.promise;
+        
+        let fullText = '';
+        // Limit pages to avoid browser hanging on massive docs during local parse
+        const maxPages = Math.min(pdf.numPages, 50); 
+        
+        for (let i = 1; i <= maxPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            const pageText = textContent.items.map((item: any) => item.str).join(' ');
+            fullText += pageText + '\n\n';
+        }
+        return fullText;
+    } catch (e: any) {
+        console.warn("Local PDF parse failed:", e);
+        // Fallback to binary handling in readFileForAI
+        throw new Error(`PDF 解析失败: ${e.message}`);
+    }
+};
+
+export const readFileForAI = async (file: File): Promise<ParsedFile> => {
+  const fileType = file.name.split('.').pop()?.toLowerCase();
+  
+  // 1. 本地直接读取的纯文本格式
+  if (['txt', 'md', 'json', 'csv'].includes(fileType || '')) {
+      try {
+          const text = await readTextFile(file);
+          return { content: text, mimeType: 'text/plain', isBinary: false };
+      } catch (e) {
+          throw new Error("文本读取失败，文件可能已损坏。");
+      }
+  }
+
+  // 2. DOCX 处理 (Mammoth)
+  if (fileType === 'docx') {
+      try {
+          if (file.size > 50 * 1024 * 1024) throw new Error("文件过大");
+          const arrayBuffer = await file.arrayBuffer();
+          const result = await mammoth.extractRawText({ arrayBuffer });
+          if (!result.value.trim()) throw new Error("内容为空");
+          return { content: result.value, mimeType: 'text/plain', isBinary: false };
+      } catch (e: any) {
+          console.warn("Mammoth parse failed:", e);
+          // If Mammoth fails, treat as binary? No, DOCX structure is complex. Just fail.
+          throw new Error(`Word 解析失败: ${e.message}`);
+      }
+  }
+
+  // 3. PDF 处理 (PDF.js Local Extraction)
+  // 优先尝试本地提取文本，因为这样可以节省大量 Token 且不受图片大小限制。
+  // 如果本地提取失败（例如是扫描版 PDF），则抛出错误并在 catch 中降级为二进制图片处理。
+  if (fileType === 'pdf') {
+     try {
+         const text = await extractPdfText(file);
+         // Ensure we got something useful (not just empty pages)
+         if (text.trim().length > 50) {
+             return { content: text, mimeType: 'text/plain', isBinary: false };
+         }
+         console.log("PDF text extraction yielded minimal content, falling back to AI OCR.");
+     } catch (e) {
+         console.warn("Local PDF extraction failed, falling back to AI OCR mode:", e);
+     }
+  }
+
+  // 4. 二进制文件 (PDF fallback, Images, Excel)
+  let mimeType = '';
   switch (fileType) {
-    case 'txt':
-    case 'md':
-    case 'json':
-    case 'csv':
-      if (onProgress) onProgress(50, '正在读取文本文件...');
-      return await readTextFile(file);
-      
-    case 'docx':
-    case 'doc':
-      if (onProgress) onProgress(50, '正在解析 Word 文档...');
-      return await readDocxFile(file);
-      
-    case 'pdf':
-      return await readPdfFile(file, onProgress);
-      
-    default:
-      throw new Error(`不支持的文件格式: .${fileType}。目前支持 .txt, .md, .doc, .docx, .pdf`);
+      case 'pdf': mimeType = 'application/pdf'; break;
+      case 'xlsx': mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'; break;
+      case 'xls': mimeType = 'application/vnd.ms-excel'; break;
+      case 'csv': mimeType = 'text/csv'; break;
+      default: 
+          if (file.type.startsWith('image/')) {
+              mimeType = file.type;
+          } else {
+              // Try text fallback
+              try {
+                  const text = await readTextFile(file);
+                  return { content: text, mimeType: 'text/plain', isBinary: false };
+              } catch {
+                  throw new Error(`不支持的文件格式: .${fileType}`);
+              }
+          }
+  }
+
+  try {
+      const buffer = await file.arrayBuffer();
+      const base64 = arrayBufferToBase64(buffer);
+      return {
+          content: base64,
+          mimeType: mimeType,
+          isBinary: true
+      };
+  } catch (e: any) {
+      throw new Error(`文件读取失败: ${e.message}`);
   }
 };
 
-// 1. Text/Markdown Parser
 const readTextFile = (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -50,87 +151,6 @@ const readTextFile = (file: File): Promise<string> => {
   });
 };
 
-// 2. Word (DOCX) Parser using Mammoth
-const readDocxFile = async (file: File): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      try {
-        const arrayBuffer = e.target?.result as ArrayBuffer;
-        const result = await mammoth.extractRawText({ arrayBuffer });
-        resolve(result.value); 
-      } catch (err) {
-        console.error(err);
-        const isDoc = file.name.toLowerCase().endsWith('.doc');
-        reject(new Error(isDoc 
-            ? "解析 .doc 文件失败。系统仅支持标准 .docx 格式，如果是旧版 Word 文档，请先另存为 .docx 格式后重试。" 
-            : "Word 文档解析失败，请确保文件未加密且格式正确"));
-      }
-    };
-    reader.onerror = () => reject(new Error("文件读取失败"));
-    reader.readAsArrayBuffer(file);
-  });
-};
-
-// 3. PDF Parser using PDF.js (Optimized for Large Files)
-const readPdfFile = async (file: File, onProgress?: (percent: number, msg: string) => void): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        try {
-            const arrayBuffer = e.target?.result as ArrayBuffer;
-            
-            // Check if getDocument is available
-            if (!pdf || !pdf.getDocument) {
-                throw new Error("PDF 解析库加载失败");
-            }
-
-            // Standard PDF.js document loading
-            const loadingTask = pdf.getDocument({ data: arrayBuffer });
-            const pdfDoc = await loadingTask.promise;
-            
-            let fullText = '';
-            const totalPages = pdfDoc.numPages;
-
-            if (onProgress) onProgress(0, `检测到 ${totalPages} 页，开始解析...`);
-
-            // Loop through each page with UI Yielding
-            for (let i = 1; i <= totalPages; i++) {
-                try {
-                    const page = await pdfDoc.getPage(i);
-                    const textContent = await page.getTextContent();
-                    // Join text items with space to preserve basic layout flow
-                    const pageText = textContent.items.map((item: any) => item.str).join(' ');
-                    fullText += `[Page ${i}]\n${pageText}\n\n`;
-
-                    // Report progress every page
-                    if (onProgress) {
-                        const percent = Math.floor((i / totalPages) * 100);
-                        onProgress(percent, `正在解析 PDF 第 ${i}/${totalPages} 页...`);
-                    }
-
-                    // CRITICAL: Yield to main thread every 5 pages to prevent UI freeze
-                    // This allows React to render the progress bar update
-                    if (i % 5 === 0) {
-                        await new Promise(resolve => setTimeout(resolve, 0));
-                    }
-                } catch (pageErr) {
-                    console.warn(`Error parsing page ${i}`, pageErr);
-                    fullText += `[Page ${i} Error]\n\n`;
-                }
-            }
-            
-            if (fullText.trim().length === 0) {
-               throw new Error("PDF 似乎是纯图片扫描件，当前版本暂不支持 OCR 识别。");
-            }
-
-            resolve(fullText);
-        } catch (err: any) {
-            console.error(err);
-            reject(new Error(err.message || "PDF 解析失败"));
-        }
-      };
-      reader.onerror = () => reject(new Error("文件读取失败"));
-      reader.readAsArrayBuffer(file);
-    });
+export const extractTextFromFile = async (file: File, onProgress?: (percent: number, msg: string) => void): Promise<string> => {
+    throw new Error("Legacy parser deprecated.");
 };

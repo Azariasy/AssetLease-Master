@@ -41,15 +41,26 @@ const ImportPage: React.FC<ImportPageProps> = ({ currentEntity, onDataChanged, c
     const expectedPrefix = currentEntity.segmentPrefix;
 
     try {
-      const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
+      const fileName = file.name.toLowerCase();
+      const isExcel = fileName.endsWith('.xlsx') || fileName.endsWith('.xls');
       let rows: any[] = [];
 
       if (importType === 'ledger') {
-        if (isExcel) rows = await parseExcelData(file, expectedPrefix);
-        else rows = parseCSVData(await readFileAsText(file), expectedPrefix);
+        if (isExcel) {
+            rows = await parseExcelData(file, expectedPrefix);
+        } else {
+            // Safety check: Don't try to read binary files as text
+            if (file.size > 50 * 1024 * 1024) throw new Error("CSV 文件过大 (超过 50MB)，建议转换为 Excel 格式导入以提高性能。");
+            const textContent = await readFileAsText(file);
+            rows = parseCSVData(textContent, expectedPrefix);
+        }
       } else {
-        if (isExcel) rows = await parseExcelBalance(file, expectedPrefix);
-        else rows = parseBalanceCSV(await readFileAsText(file), expectedPrefix);
+        if (isExcel) {
+            rows = await parseExcelBalance(file, expectedPrefix);
+        } else {
+            const textContent = await readFileAsText(file);
+            rows = parseBalanceCSV(textContent, expectedPrefix);
+        }
       }
 
       if (rows.length === 0) {
@@ -68,8 +79,10 @@ const ImportPage: React.FC<ImportPageProps> = ({ currentEntity, onDataChanged, c
           const detected = err.message.split(':')[1];
           const actualName = config.entities.find(e => e.segmentPrefix === detected)?.name || '未知主体';
           setErrorMsg(`⛔ 主体校验失败：当前在【${currentEntity.name}】下，但文件包含【${actualName} (${detected})】的数据。禁止跨主体导入！`);
+      } else if (err.message && (err.message.includes('Invalid array length') || err.name === 'RangeError')) {
+          setErrorMsg("文件解析错误：文件可能损坏或格式不兼容 (Invalid array length)。请尝试另存为标准 Excel (.xlsx) 格式后重试。");
       } else {
-          setErrorMsg("解析文件失败，请确保文件未损坏且格式正确。");
+          setErrorMsg(`解析文件失败: ${err.message || '未知错误'}`);
       }
     } finally {
       setIsParsing(false);
@@ -79,7 +92,15 @@ const ImportPage: React.FC<ImportPageProps> = ({ currentEntity, onDataChanged, c
   const readFileAsText = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onload = (e) => resolve(e.target?.result as string);
+      reader.onload = (e) => {
+          const text = e.target?.result as string;
+          // Simple check for binary content in a text read (if many null bytes)
+          if (text.includes('\0\0\0')) {
+              reject(new Error("检测到二进制内容。请确认这是有效的 CSV/文本文件，如果是 Excel 请确保扩展名为 .xlsx"));
+              return;
+          }
+          resolve(text);
+      };
       reader.onerror = (e) => reject(e);
       reader.readAsText(file); 
     });
@@ -91,7 +112,7 @@ const ImportPage: React.FC<ImportPageProps> = ({ currentEntity, onDataChanged, c
     const rowsWithBatch = parsedRows.map(r => ({ ...r, importId }));
 
     try {
-      // 1. Auto-Learn Departments
+      // 1. Auto-Learn Departments (Smarter Logic)
       const newMap = { ...config.departmentMap };
       let learnCount = 0;
       
@@ -110,12 +131,18 @@ const ImportPage: React.FC<ImportPageProps> = ({ currentEntity, onDataChanged, c
               name = r.costCenterName || '';
           }
 
-          // If we have both, and code is not generic/default, and it's not already mapped or mapped to something generic
+          // If we have both, and code is not generic/default
           if (code && code.length >= 6 && name && name !== '缺省' && name !== 'Default') {
-              // Only update if not exists or if the existing name looks less descriptive (simplified logic: just overwrite)
-              if (!newMap[code] || newMap[code] !== name) {
-                  newMap[code] = name;
-                  learnCount++;
+              const currentName = newMap[code];
+              // Update if:
+              // 1. Not exists
+              // 2. Existing is generic or default
+              // 3. New name is longer/more specific (heuristic)
+              if (!currentName || currentName === '缺省' || (name.length > currentName.length)) {
+                  if (newMap[code] !== name) {
+                      newMap[code] = name;
+                      learnCount++;
+                  }
               }
           }
       });

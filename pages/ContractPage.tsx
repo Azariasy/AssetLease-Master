@@ -2,6 +2,7 @@
 import React, { useState } from 'react';
 import { LeaseContract, PartnerType } from '../types';
 import { extractContractData } from '../services/geminiService';
+import { readFileForAI } from '../utils/fileParser';
 import { UploadCloud, CheckCircle2, FileText, Loader2 } from 'lucide-react';
 
 const ContractPage = ({ contracts, onImport }: { contracts: LeaseContract[], onImport: (c: any) => void }) => {
@@ -13,12 +14,13 @@ const ContractPage = ({ contracts, onImport }: { contracts: LeaseContract[], onI
     if (!file) return;
 
     setIsImporting(true);
-    // Convert to base64
-    const reader = new FileReader();
-    reader.onload = async (evt) => {
-      const base64 = (evt.target?.result as string).split(',')[1];
-      try {
-        const extractedData = await extractContractData(base64, file.type);
+    
+    try {
+        // Use modern parser (supports DOCX local, PDF binary)
+        const { content, mimeType, isBinary } = await readFileForAI(file);
+        
+        // Pass to AI Service
+        const extractedData = await extractContractData(content, mimeType, isBinary);
         
         // Validate payment cycle
         const validCycles = ['月度', '季度', '年度', '一次性'];
@@ -45,14 +47,12 @@ const ContractPage = ({ contracts, onImport }: { contracts: LeaseContract[], onI
         };
         onImport(newContract);
         alert(`成功导入合同：${newContract.name}`);
-      } catch (err) {
+    } catch (err: any) {
         console.error(err);
-        alert('AI 解析失败，请重试');
-      } finally {
+        alert(`导入失败: ${err.message || "未知错误"}`);
+    } finally {
         setIsImporting(false);
-      }
-    };
-    reader.readAsDataURL(file);
+    }
   };
 
   return (
@@ -83,7 +83,7 @@ const ContractPage = ({ contracts, onImport }: { contracts: LeaseContract[], onI
               <UploadCloud size={32} />
             </div>
             <h3 className="text-lg font-bold text-slate-800">拖拽或点击上传合同文件</h3>
-            <p className="text-sm text-slate-400 mt-2">支持 PDF / Word 格式，AI 自动识别填充字段</p>
+            <p className="text-sm text-slate-400 mt-2">支持 PDF / Word (DOCX) 格式，AI 自动识别填充字段</p>
           </>
         )}
       </div>

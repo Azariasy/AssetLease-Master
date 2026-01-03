@@ -19,9 +19,6 @@ export interface SystemConfig {
   
   // New: 关联方配置
   entities: Company[];
-  
-  // New: DeepSeek API Key
-  aiApiKey?: string;
 }
 
 // 字段映射模板

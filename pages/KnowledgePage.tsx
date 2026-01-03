@@ -1,46 +1,108 @@
 
-import React, { useState, useEffect } from 'react';
-import { Upload, FileText, CheckCircle2, Trash2, BookOpen, BrainCircuit, Loader2, FileUp, Network, Link, Search, Sparkles, MessageSquare, Quote, X, Users, Lightbulb, ArrowRight, Eye, Layers } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Upload, FileText, CheckCircle2, Trash2, BrainCircuit, Loader2, FileUp, Sparkles, X, Users, Quote, Send, Bot, BookOpenCheck, ChevronRight, Layers, ExternalLink, Box } from 'lucide-react';
 import { db } from '../db';
 import { KnowledgeDocument, KnowledgeChunk } from '../types';
-import { ingestDocument, queryKnowledgeBase } from '../services/geminiService';
-import { extractTextFromFile } from '../utils/fileParser';
+import { ingestDocument, queryKnowledgeBaseStream, parseDocumentWithAI, searchKnowledgeBase, getDocumentChunks } from '../services/geminiService';
+import { readFileForAI } from '../utils/fileParser';
 
-interface SearchResult {
-    answer: string;
-    sources: (KnowledgeChunk & { score: number })[];
+interface ChatMessage {
+    id: string;
+    role: 'user' | 'assistant';
+    content: string;
+    sources?: (KnowledgeChunk & { score: number })[];
+    timestamp: number;
 }
 
 const SUGGESTED_QUESTIONS = [
     "差旅费的报销标准是多少？",
-    "研发费用资本化的条件是什么？",
     "招待费的审批流程是怎样的？",
     "固定资产折旧年限规定？"
 ];
 
+const CitationRenderer = ({ text, sources, onSourceClick }: { text: string, sources?: any[], onSourceClick: (idx: number) => void }) => {
+    if (!text) return null;
+    const parts = text.split(/(\[\d+\])/g);
+
+    return (
+        <span>
+            {parts.map((part, i) => {
+                const match = part.match(/^\[(\d+)\]$/);
+                if (match) {
+                    const index = parseInt(match[1]) - 1; 
+                    if (sources && sources[index]) {
+                        return (
+                            <button
+                                key={i}
+                                onClick={() => onSourceClick(index)}
+                                className="inline-flex items-center justify-center w-4 h-4 ml-0.5 -mt-2 text-[9px] font-bold text-indigo-600 bg-indigo-100 rounded-full hover:bg-indigo-600 hover:text-white transition-colors align-top cursor-pointer border border-indigo-200"
+                                title={`点击查看来源: ${sources[index].sourceTitle}`}
+                            >
+                                {match[1]}
+                            </button>
+                        );
+                    }
+                }
+                return <span key={i}>{part}</span>;
+            })}
+        </span>
+    );
+};
+
 const KnowledgePage: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<'chat' | 'library'>('library');
   const [documents, setDocuments] = useState<(KnowledgeDocument & { chunkCount?: number })[]>([]);
+  
+  // Library State
   const [isProcessing, setIsProcessing] = useState(false);
   const [processStatus, setProcessStatus] = useState<string>('');
   const [processPercent, setProcessPercent] = useState<number>(0);
-  const [activeTab, setActiveTab] = useState<'policy' | 'accounting_manual' | 'business_rule'>('accounting_manual');
+  const [libraryCategory, setLibraryCategory] = useState<'policy' | 'accounting_manual' | 'business_rule'>('accounting_manual');
 
-  // Search State
-  const [searchQuery, setSearchQuery] = useState('');
-  const [isSearching, setIsSearching] = useState(false);
-  const [searchResult, setSearchResult] = useState<SearchResult | null>(null);
+  // Chat State
+  const [chatInput, setChatInput] = useState('');
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
-  // Preview Modal State
-  const [previewDoc, setPreviewDoc] = useState<KnowledgeDocument | null>(null);
-  const [previewChunks, setPreviewChunks] = useState<KnowledgeChunk[]>([]);
+  // Preview State with Highlight Logic
+  const [previewContent, setPreviewContent] = useState<{ 
+      title: string, 
+      mode: 'doc' | 'chunks', 
+      content?: string, 
+      chunks?: KnowledgeChunk[], 
+      highlightChunkId?: string, 
+      docId?: string 
+  } | null>(null);
+
+  const previewRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     loadDocuments();
   }, []);
 
+  useEffect(() => {
+    if (activeTab === 'chat') {
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, activeTab]);
+
+  // SCROLL LOGIC: Trigger scroll when preview content changes AND has a highlight request
+  useEffect(() => {
+      if (previewContent?.highlightChunkId && previewRef.current) {
+          // Add a small delay to ensure rendering and panel expansion is complete
+          setTimeout(() => {
+              const element = document.getElementById(`chunk-${previewContent.highlightChunkId}`);
+              if (element) {
+                  element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  // Optional: Add visual flash effect handled by CSS or just relies on the bg color
+              }
+          }, 300);
+      }
+  }, [previewContent]);
+
   const loadDocuments = async () => {
     try {
-        // Load ALL documents (Shared Knowledge Base)
         const docs = await db.knowledge.toArray();
         const docsWithStats = await Promise.all(docs.map(async (d) => {
             const count = await db.chunks.where('documentId').equals(d.id).count();
@@ -61,32 +123,34 @@ const KnowledgePage: React.FC = () => {
     const file = files[0];
     
     try {
-        // 1. Extract Text
-        setProcessStatus(`准备解析 ${file.name}...`);
+        setProcessStatus(`正在读取文件 ${file.name}...`);
+        const { content: fileData, mimeType, isBinary } = await readFileForAI(file);
         
-        // Pass progress callback to parser
-        const content = await extractTextFromFile(file, (pct, msg) => {
-            setProcessPercent(pct);
-            setProcessStatus(msg);
-        });
+        let fullText = "";
 
-        if (!content || content.trim().length < 10) {
-            throw new Error("未能提取到有效文本，请检查文件是否为空或为纯图片扫描件。");
+        setProcessPercent(10);
+        setProcessStatus("正在进行云端 OCR 与结构化解析...");
+        fullText = await parseDocumentWithAI(file, fileData, mimeType, (msg) => setProcessStatus(msg));
+
+        if (!fullText || fullText.trim().length < 10) {
+            throw new Error("未能提取到有效文本，请检查文件。");
         }
         
-        // 2. Ingest (Chunk -> Graph -> Embed -> Save)
-        setProcessPercent(100); // Parsing done
+        setProcessPercent(50); 
+        setProcessStatus("AI 正在理解文档并构建向量索引...");
         const docId = `doc-${Date.now()}`;
-        const { summary, entities } = await ingestDocument(docId, file.name, content, (stage) => setProcessStatus(stage));
         
-        // 3. Save Document Meta
+        const { summary, entities, rules } = await ingestDocument(docId, file.name, fullText, (stage) => setProcessStatus(stage));
+        
+        const enrichedSummary = summary + (rules && rules.length > 0 ? "\n\n[关键规则]: " + rules.slice(0,3).join("; ") : "");
+
         const newDoc: KnowledgeDocument = {
             id: docId,
             title: file.name.replace(/\.[^/.]+$/, ""),
-            content: content,
-            summary: summary,
+            content: fullText,
+            summary: enrichedSummary,
             entities: entities,
-            category: activeTab,
+            category: libraryCategory,
             uploadDate: new Date().toLocaleString(),
             status: 'active'
         };
@@ -95,383 +159,405 @@ const KnowledgePage: React.FC = () => {
         await loadDocuments();
         
         e.target.value = ''; 
+        setProcessPercent(100);
+        setProcessStatus("处理完成！");
+        setTimeout(() => { setIsProcessing(false); setProcessStatus(''); }, 1500);
+
     } catch (err: any) {
         console.error(err);
         alert(err.message || "处理失败");
-    } finally {
         setIsProcessing(false);
         setProcessStatus('');
-        setProcessPercent(0);
     }
   };
 
   const handleDelete = async (e: React.MouseEvent, id: string) => {
       e.stopPropagation();
-      e.preventDefault();
-
-      if(confirm('确定要删除这份文档吗？相关的知识切片和向量索引也将被移除。')) {
-          try {
-              await db.knowledge.delete(id);
-              await db.chunks.where('documentId').equals(id).delete();
-              setDocuments(prev => prev.filter(d => d.id !== id));
-          } catch (err) {
-              console.error("Delete failed", err);
-              alert("删除失败，请刷新重试");
-              loadDocuments();
-          }
+      if(confirm('确定要删除这份文档吗？')) {
+          await db.knowledge.delete(id);
+          await db.chunks.where('documentId').equals(id).delete();
+          setDocuments(prev => prev.filter(d => d.id !== id));
       }
   };
 
-  const handleSearch = async (queryOverride?: string) => {
-      const q = queryOverride || searchQuery;
-      if(!q.trim()) return;
-      
-      setSearchQuery(q);
-      setIsSearching(true);
-      setSearchResult(null);
-      
+  const handleSendMessage = async (textOverride?: string) => {
+      const text = textOverride || chatInput;
+      if (!text.trim()) return;
+
+      const userMsg: ChatMessage = { id: Date.now().toString(), role: 'user', content: text, timestamp: Date.now() };
+      setMessages(prev => [...prev, userMsg]);
+      setChatInput('');
+      setIsChatLoading(true);
+
+      const botMsgId = (Date.now() + 1).toString();
+      setMessages(prev => [...prev, { 
+          id: botMsgId, 
+          role: 'assistant', 
+          content: '', 
+          timestamp: Date.now() 
+      }]);
+
       try {
-          const res = await queryKnowledgeBase(q);
-          setSearchResult(res);
-      } catch(e) {
-          console.error(e);
-          alert("检索失败，请检查网络或稍后再试");
+          const stream = queryKnowledgeBaseStream(text);
+          let fullText = '';
+          
+          for await (const chunk of stream) {
+              if (chunk.type === 'sources') {
+                  setMessages(prev => prev.map(m => m.id === botMsgId ? { ...m, sources: chunk.sources } : m));
+              } else if (chunk.type === 'text') {
+                  fullText += chunk.content;
+                  setMessages(prev => prev.map(m => m.id === botMsgId ? { ...m, content: fullText } : m));
+              }
+          }
+      } catch (e) {
+          setMessages(prev => prev.map(m => m.id === botMsgId ? { ...m, content: "AI 服务连接中断。" } : m));
       } finally {
-          setIsSearching(false);
+          setIsChatLoading(false);
       }
   };
 
-  const openPreview = async (doc: KnowledgeDocument) => {
-      setPreviewDoc(doc);
-      // Load chunks for this doc
-      const chunks = await db.chunks.where('documentId').equals(doc.id).toArray();
-      setPreviewChunks(chunks);
+  // Improved Source Preview Trigger
+  const openSourcePreview = (chunk: KnowledgeChunk) => {
+      const doc = documents.find(d => d.id === chunk.documentId);
+      if (!doc) return;
+
+      setPreviewContent({
+          title: chunk.sourceTitle,
+          mode: 'doc',
+          content: doc.content,
+          highlightChunkId: chunk.id, // Pass ID for robust scrolling
+          docId: doc.id
+      });
   };
 
-  const getRelatedDocs = (currentDoc: KnowledgeDocument) => {
-      if (!currentDoc.entities || currentDoc.entities.length === 0) return [];
-      return documents.filter(d => 
-          d.id !== currentDoc.id && 
-          d.entities?.some(e => currentDoc.entities?.includes(e))
-      ).slice(0, 3);
+  const openChunkView = async (docId: string, title: string) => {
+      try {
+          const chunks = await getDocumentChunks(docId);
+          setPreviewContent({
+              title: title,
+              mode: 'chunks',
+              chunks: chunks
+          });
+      } catch (e) {
+          console.error("Failed to load chunks", e);
+      }
   };
 
-  const getFileIcon = (title: string) => {
-      if (title.endsWith('.pdf')) return <FileText size={24} className="text-red-500" />;
-      if (title.endsWith('.doc') || title.endsWith('.docx')) return <FileText size={24} className="text-blue-500" />;
-      return <FileText size={24} className="text-slate-500" />;
-  };
-
-  const getScoreColor = (score: number) => {
-      if(score > 0.8) return 'text-emerald-600 bg-emerald-50 border-emerald-100';
-      if(score > 0.6) return 'text-blue-600 bg-blue-50 border-blue-100';
-      return 'text-amber-600 bg-amber-50 border-amber-100';
+  // Helper to highlight text within the full document content
+  // Since we don't have exact offset storage, we do a split-based approximation which is usually good enough for RAG.
+  // Note: For perfect precision, one would store start/end indices in ingestDocument. 
+  // Here we use a visual marker approach based on finding the text.
+  const renderHighlightedContent = (fullText: string, highlightId: string | undefined) => {
+      // If we have a highlight ID, we need to find the text of that chunk.
+      // But we passed the ID, not the text. We should fetch chunks for this doc to match.
+      // Optimization: We fetch chunks once when opening doc view.
+      return <AsyncDocumentRenderer fullText={fullText} highlightId={highlightId} docId={previewContent?.docId} />;
   };
 
   return (
-    <div className="max-w-5xl mx-auto space-y-8 pb-20 relative">
-      {/* Header */}
-      <div className="bg-gradient-to-r from-violet-600 to-indigo-600 p-8 rounded-3xl text-white shadow-xl relative overflow-hidden">
-         <div className="relative z-10">
-            <div className="flex justify-between items-start">
-                <div>
-                    <h2 className="text-3xl font-bold mb-2 flex items-center gap-3">
-                        <BrainCircuit size={32} className="text-violet-200" />
-                        集团共享知识库
-                    </h2>
-                    <p className="text-violet-100 opacity-90 max-w-2xl text-sm">
-                        这里存储了<b>所有主体共用</b>的财务制度与核算标准。基于向量引擎，为您提供精准的语义检索。
-                    </p>
-                </div>
-                <div className="hidden md:flex items-center gap-2 bg-white/10 px-3 py-1.5 rounded-full backdrop-blur-sm border border-white/10">
-                    <Users size={14} className="text-violet-200"/>
-                    <span className="text-xs font-bold text-violet-100">全员共享资源</span>
-                </div>
-            </div>
-         </div>
-         <div className="absolute right-0 top-0 w-64 h-64 bg-white/10 rounded-full blur-3xl -mr-16 -mt-16"></div>
-      </div>
-
-      {/* 🔍 Search Playground */}
-      <div className="bg-white rounded-3xl p-6 border border-slate-100 shadow-lg relative overflow-hidden">
-          <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-violet-500 to-indigo-500"></div>
-          
-          <div className="flex gap-2 mb-4">
-              <div className="relative flex-1">
-                  <input 
-                    type="text" 
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                    placeholder="请输入您想咨询的财务问题..."
-                    className="w-full pl-12 pr-10 py-4 bg-slate-50 border border-slate-200 rounded-xl text-base font-bold text-slate-700 outline-none focus:border-indigo-500 focus:bg-white transition-all placeholder:font-normal placeholder:text-slate-400"
-                  />
-                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
-                  {searchQuery && (
-                      <button onClick={() => {setSearchQuery(''); setSearchResult(null);}} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 hover:text-slate-500">
-                          <X size={16} />
-                      </button>
-                  )}
-              </div>
+    <div className="max-w-7xl mx-auto h-full flex flex-col">
+      {/* Header Tabs */}
+      <div className="flex items-center justify-between mb-6 shrink-0">
+          <div className="flex bg-white p-1 rounded-xl shadow-sm border border-slate-100">
               <button 
-                onClick={() => handleSearch()}
-                disabled={isSearching || !searchQuery.trim()}
-                className="px-8 py-4 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 disabled:opacity-50 transition-all flex items-center gap-2 shadow-lg shadow-indigo-200 whitespace-nowrap"
+                  onClick={() => setActiveTab('library')}
+                  className={`px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all ${activeTab === 'library' ? 'bg-indigo-50 text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}
               >
-                  {isSearching ? <Loader2 size={20} className="animate-spin" /> : <Sparkles size={20} />}
-                  <span>AI 检索</span>
+                  <BookOpenCheck size={16} /> 资料库 (AI 训练)
+              </button>
+              <button 
+                  onClick={() => setActiveTab('chat')}
+                  className={`px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all ${activeTab === 'chat' ? 'bg-indigo-50 text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                  <Bot size={16} /> 智能问答
               </button>
           </div>
-
-          {/* Quick Suggestions */}
-          {!searchResult && !isSearching && (
-              <div className="flex flex-wrap gap-2 animate-in fade-in slide-in-from-bottom-2">
-                  <div className="flex items-center gap-1 text-slate-400 text-xs font-bold mr-2">
-                      <Lightbulb size={12} /> 猜你想问:
-                  </div>
-                  {SUGGESTED_QUESTIONS.map((q, i) => (
-                      <button 
-                        key={i}
-                        onClick={() => handleSearch(q)}
-                        className="px-3 py-1 bg-slate-50 hover:bg-indigo-50 text-slate-500 hover:text-indigo-600 text-xs rounded-full border border-slate-200 hover:border-indigo-100 transition-colors"
-                      >
-                          {q}
-                      </button>
-                  ))}
-              </div>
-          )}
-
-          {/* Search Results */}
-          {searchResult && (
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 animate-in fade-in slide-in-from-top-4 mt-6">
-                  {/* AI Answer */}
-                  <div className="md:col-span-2 space-y-4">
-                      <div className="p-6 bg-indigo-50/50 rounded-2xl border border-indigo-100 relative">
-                          <div className="absolute -top-3 -left-3 bg-white p-2 rounded-full shadow-sm border border-indigo-50">
-                              <MessageSquare size={20} className="text-indigo-600" />
-                          </div>
-                          <h4 className="font-bold text-indigo-900 mb-2 ml-2">AI 综合回答</h4>
-                          <p className="text-slate-700 leading-relaxed text-sm whitespace-pre-line ml-2">
-                              {searchResult.answer}
-                          </p>
-                      </div>
-                  </div>
-
-                  {/* Sources / Evidence */}
-                  <div className="md:col-span-1 space-y-3">
-                      <div className="flex items-center gap-2 text-slate-400 font-bold text-xs uppercase tracking-wider mb-1">
-                          <Quote size={12} /> 知识来源 (引用片段)
-                      </div>
-                      <div className="space-y-3 max-h-[400px] overflow-y-auto pr-1 scrollbar-thin">
-                          {searchResult.sources.map((src, idx) => (
-                              <div key={idx} className="p-3 bg-white border border-slate-100 rounded-xl shadow-sm hover:border-indigo-200 transition-colors group relative cursor-help">
-                                  <div className={`absolute top-2 right-2 px-1.5 py-0.5 rounded text-[10px] font-bold border ${getScoreColor(src.score)}`}>
-                                      匹配度 {(src.score * 100).toFixed(0)}%
-                                  </div>
-                                  <div className="flex items-center gap-2 mb-2">
-                                      <FileText size={12} className="text-slate-400" />
-                                      <div className="text-xs font-bold text-slate-700 truncate pr-16" title={src.sourceTitle}>
-                                          {src.sourceTitle}
-                                      </div>
-                                  </div>
-                                  <p className="text-[11px] text-slate-500 line-clamp-4 leading-relaxed group-hover:text-slate-700 bg-slate-50 p-2 rounded border border-slate-100">
-                                      ...{src.content}...
-                                  </p>
-                              </div>
-                          ))}
-                      </div>
-                  </div>
+          {isProcessing && (
+              <div className="flex items-center gap-2 text-xs font-bold text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-full animate-pulse">
+                  <Loader2 size={12} className="animate-spin" />
+                  <span>{processStatus} {processPercent}%</span>
               </div>
           )}
       </div>
 
-      {/* Document Library */}
-      <div className="flex flex-col gap-6 mt-8">
-         <div className="flex items-center justify-between">
-             <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-                 <BookOpen size={20} className="text-slate-400" />
-                 文档列表
-             </h3>
-             
-             {/* Upload Button */}
-             <div className="relative">
-                <input 
-                    type="file" 
-                    id="doc-upload" 
-                    className="hidden" 
-                    accept=".txt,.md,.json,.csv,.doc,.docx,.pdf" 
-                    onChange={handleFileUpload}
-                    disabled={isProcessing}
-                />
-                <label 
-                    htmlFor="doc-upload" 
-                    className={`flex items-center gap-2 px-4 py-2 bg-slate-900 text-white text-sm font-bold rounded-xl cursor-pointer hover:bg-slate-800 transition-all shadow-lg ${isProcessing ? 'opacity-70 cursor-wait' : ''}`}
-                >
-                    {isProcessing ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
-                    <span>{isProcessing ? `解析中 ${processPercent}%` : '上传制度文档'}</span>
-                </label>
-             </div>
-         </div>
-
-         {/* Tabs */}
-         <div className="flex gap-2 border-b border-slate-200 pb-1">
-             {[
-                 { id: 'accounting_manual', label: '会计核算手册' },
-                 { id: 'policy', label: '报销制度与标准' },
-                 { id: 'business_rule', label: '业务指引' }
-             ].map(tab => (
-                 <button 
-                    key={tab.id}
-                    onClick={() => setActiveTab(tab.id as any)}
-                    className={`px-4 py-2 text-sm font-bold border-b-2 transition-colors ${activeTab === tab.id ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
-                 >
-                     {tab.label}
-                 </button>
-             ))}
-         </div>
-         
-         {/* Loading Status */}
-         {isProcessing && (
-            <div className="flex items-center justify-center p-8 bg-indigo-50/50 rounded-2xl border border-indigo-100 animate-pulse">
-                <div className="flex flex-col items-center gap-2">
-                    <div className="text-indigo-600 font-medium flex items-center gap-3">
-                        <Loader2 size={24} className="animate-spin" />
-                        <span className="text-lg">{processStatus || '正在解析文档...'}</span>
-                    </div>
-                    {processPercent > 0 && processPercent < 100 && (
-                        <div className="w-64 h-2 bg-indigo-100 rounded-full mt-2 overflow-hidden">
-                            <div className="h-full bg-indigo-500 rounded-full transition-all duration-300" style={{ width: `${processPercent}%` }}></div>
+      <div className="flex-1 min-h-0 flex gap-6">
+        
+        {/* Left Panel: Content */}
+        <div className={`flex flex-col transition-all duration-300 ${previewContent ? 'w-1/2' : 'w-full'}`}>
+            
+            {activeTab === 'library' && (
+                <div className="bg-white rounded-3xl border border-slate-100 shadow-sm p-8 h-full overflow-y-auto">
+                    {/* Upload Area */}
+                    <div className="mb-8 p-6 bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200 hover:border-indigo-300 transition-colors flex flex-col items-center justify-center text-center relative group">
+                        <input type="file" className="absolute inset-0 opacity-0 cursor-pointer z-10" onChange={handleFileUpload} disabled={isProcessing} accept=".pdf,.doc,.docx,.txt" />
+                        <div className="w-16 h-16 bg-white rounded-full shadow-sm flex items-center justify-center mb-4 text-indigo-500 group-hover:scale-110 transition-transform">
+                            {isProcessing ? <Loader2 size={32} className="animate-spin" /> : <FileUp size={32} />}
                         </div>
-                    )}
+                        <h3 className="text-lg font-bold text-slate-800">上传财务制度文件</h3>
+                        <p className="text-sm text-slate-500 mt-1 max-w-md mx-auto">
+                            AI 将自动进行全文 OCR、语义理解、规则提取和向量化索引。
+                            <br />支持 PDF, Word (Docx), TXT。
+                        </p>
+                    </div>
+
+                    <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                        <Layers size={18} className="text-slate-400" />
+                        已收录文档 ({documents.length})
+                    </h3>
+                    
+                    <div className="grid grid-cols-1 gap-4">
+                        {documents.map(doc => (
+                            <div key={doc.id} className="group relative p-5 rounded-xl border border-slate-100 hover:border-indigo-200 hover:shadow-md transition-all bg-white">
+                                <div className="flex justify-between items-start">
+                                    <div className="flex items-center gap-4">
+                                        <div className="p-3 bg-slate-50 rounded-lg text-blue-600">
+                                            <FileText size={24} />
+                                        </div>
+                                        <div>
+                                            <h4 className="font-bold text-slate-800">{doc.title}</h4>
+                                            <div className="flex gap-2 text-xs text-slate-400 mt-1 items-center">
+                                                <span>{doc.uploadDate}</span>
+                                                <span>•</span>
+                                                <button 
+                                                    onClick={(e) => { e.stopPropagation(); openChunkView(doc.id, doc.title); }}
+                                                    className="flex items-center gap-1 text-emerald-600 font-medium hover:underline hover:text-emerald-800 transition-colors bg-emerald-50 px-2 py-0.5 rounded cursor-pointer"
+                                                    title="点击查看所有切片详情"
+                                                >
+                                                    <Box size={10} />
+                                                    {doc.chunkCount} 个知识切片
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <button onClick={(e) => handleDelete(e, doc.id)} className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-full opacity-0 group-hover:opacity-100 transition-all">
+                                        <Trash2 size={16} />
+                                    </button>
+                                </div>
+                                
+                                <div className="mt-4 pt-4 border-t border-slate-50">
+                                    <div className="flex items-start gap-2">
+                                        <Sparkles size={14} className="text-purple-500 mt-0.5 shrink-0" />
+                                        <p className="text-xs text-slate-600 leading-relaxed line-clamp-3">
+                                            {doc.summary}
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {activeTab === 'chat' && (
+                <div className="bg-white rounded-3xl border border-slate-100 shadow-xl h-full flex flex-col overflow-hidden">
+                    <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-slate-50/50 scrollbar-thin">
+                        {messages.length === 0 && (
+                            <div className="h-full flex flex-col items-center justify-center text-center opacity-60">
+                                <BrainCircuit size={64} className="text-indigo-200 mb-6" />
+                                <h2 className="text-xl font-bold text-slate-700 mb-2">我是您的 AI 财务专家</h2>
+                                <p className="text-slate-500 max-w-sm mb-8">我已经学习了您的财务制度库，您可以问我关于报销标准、合规流程或预算规定的任何问题。</p>
+                                <div className="flex flex-wrap gap-2 justify-center max-w-lg">
+                                    {SUGGESTED_QUESTIONS.map((q,i) => (
+                                        <button key={i} onClick={() => handleSendMessage(q)} className="px-4 py-2 bg-white border border-slate-200 rounded-full text-xs font-bold text-slate-600 hover:border-indigo-500 hover:text-indigo-600 transition-all">
+                                            {q}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {messages.map(msg => (
+                            <div key={msg.id} className={`flex gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
+                                <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 shadow-sm ${msg.role === 'user' ? 'bg-white text-slate-600' : 'bg-gradient-to-br from-indigo-600 to-violet-600 text-white'}`}>
+                                    {msg.role === 'user' ? <Users size={20} /> : <Bot size={20} />}
+                                </div>
+                                <div className="max-w-[85%] space-y-2">
+                                    <div className={`p-5 rounded-2xl text-sm leading-relaxed shadow-sm ${msg.role === 'user' ? 'bg-slate-800 text-white rounded-tr-none' : 'bg-white border border-slate-100 rounded-tl-none text-slate-700'}`}>
+                                        <CitationRenderer 
+                                            text={msg.content} 
+                                            sources={msg.sources}
+                                            onSourceClick={(idx) => msg.sources && msg.sources[idx] && openSourcePreview(msg.sources[idx])}
+                                        />
+                                        {msg.role === 'assistant' && !msg.content && isChatLoading && (
+                                            <span className="animate-pulse">Thinking...</span>
+                                        )}
+                                    </div>
+                                    
+                                    {msg.sources && msg.sources.length > 0 && (
+                                        <div className="flex flex-wrap gap-2 pl-2">
+                                            <div className="text-[10px] text-slate-400 font-bold uppercase w-full mb-1">参考资料来源</div>
+                                            {msg.sources.map((src, i) => (
+                                                <button 
+                                                    key={i}
+                                                    onClick={() => openSourcePreview(src)}
+                                                    className="flex items-center gap-1.5 px-2 py-1 bg-white hover:bg-indigo-50 border border-slate-200 hover:border-indigo-200 rounded text-[10px] text-slate-500 hover:text-indigo-600 transition-all group"
+                                                >
+                                                    <span className="font-mono font-bold bg-slate-100 text-slate-500 group-hover:bg-indigo-100 group-hover:text-indigo-600 rounded px-1">{i + 1}</span>
+                                                    <span className="truncate max-w-[100px]">{src.sourceTitle}</span>
+                                                </button>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        ))}
+                        <div ref={chatEndRef}></div>
+                    </div>
+
+                    <div className="p-4 bg-white border-t border-slate-100 shrink-0">
+                        <div className="relative">
+                            <input 
+                                type="text"
+                                value={chatInput}
+                                onChange={(e) => setChatInput(e.target.value)}
+                                onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+                                placeholder="输入问题，AI 将引用原文回答..."
+                                className="w-full pl-5 pr-14 py-4 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 transition-all"
+                                disabled={isChatLoading}
+                            />
+                            <button 
+                                onClick={() => handleSendMessage()}
+                                disabled={!chatInput.trim() || isChatLoading}
+                                className="absolute right-2 top-1/2 -translate-y-1/2 p-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:hover:bg-indigo-600 transition-all shadow-md shadow-indigo-200"
+                            >
+                                <Send size={18} />
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+
+        {/* Right Panel: Preview (Collapsible) */}
+        {previewContent && (
+            <div className="w-1/2 bg-white rounded-3xl border border-slate-100 shadow-2xl flex flex-col overflow-hidden animate-in slide-in-from-right-10 duration-300 z-10">
+                <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50 shrink-0">
+                    <div className="flex items-center gap-3 overflow-hidden">
+                        <div className="p-2 bg-white rounded-lg border border-slate-200 shadow-sm text-indigo-600">
+                            {previewContent.mode === 'chunks' ? <Layers size={18} /> : <FileText size={18} />}
+                        </div>
+                        <div>
+                            <div className="text-[10px] uppercase font-bold text-slate-400">
+                                {previewContent.mode === 'chunks' ? '知识切片概览' : '文档来源预览'}
+                            </div>
+                            <h3 className="font-bold text-slate-800 text-sm truncate max-w-[200px]" title={previewContent.title}>{previewContent.title}</h3>
+                        </div>
+                    </div>
+                    <button onClick={() => setPreviewContent(null)} className="p-2 hover:bg-slate-200 rounded-full text-slate-400 transition-colors">
+                        <X size={20} />
+                    </button>
+                </div>
+                
+                <div className="flex-1 overflow-y-auto p-0 bg-white relative" ref={previewRef}>
+                    {previewContent.mode === 'doc' ? (
+                        <div className="prose prose-sm prose-slate max-w-none p-8">
+                            {renderHighlightedContent(previewContent.content || '', previewContent.highlightChunkId)}
+                        </div>
+                    ) : previewContent.mode === 'chunks' && previewContent.chunks ? (
+                        <div className="p-4 space-y-3 bg-slate-50/50">
+                            {previewContent.chunks.map((chunk, idx) => (
+                                <div key={chunk.id} className="bg-white p-4 rounded-xl border border-slate-100 shadow-sm hover:border-indigo-200 transition-all">
+                                    <div className="flex justify-between items-center mb-2">
+                                        <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded">
+                                            切片 #{idx + 1}
+                                        </span>
+                                        <span className="text-[10px] text-slate-300 font-mono">
+                                            Length: {chunk.content.length}
+                                        </span>
+                                    </div>
+                                    <p className="text-xs text-slate-600 leading-relaxed font-mono whitespace-pre-wrap">
+                                        {chunk.content}
+                                    </p>
+                                </div>
+                            ))}
+                        </div>
+                    ) : null}
                 </div>
             </div>
-         )}
+        )}
 
-         {/* Document List Items */}
-         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-             {documents.filter(d => d.category === activeTab).map(doc => {
-                 const relatedDocs = getRelatedDocs(doc);
-                 return (
-                 <div key={doc.id} className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-all group flex flex-col relative">
-                     <div className="flex justify-between items-start mb-3">
-                         <div className="flex items-center gap-3 overflow-hidden">
-                             <div className="p-2.5 bg-slate-50 text-slate-600 rounded-xl shrink-0">
-                                 {getFileIcon(doc.title)}
-                             </div>
-                             <div className="min-w-0">
-                                 <h3 className="font-bold text-slate-800 text-sm truncate" title={doc.title}>{doc.title}</h3>
-                                 <div className="flex items-center gap-2 text-[10px] text-slate-400 mt-1">
-                                     <span>{doc.uploadDate.split(' ')[0]}</span>
-                                     <span className="w-1 h-1 bg-slate-300 rounded-full"></span>
-                                     <span className="text-emerald-600 flex items-center gap-1"><CheckCircle2 size={10} /> 已索引 ({doc.chunkCount || 0} 片)</span>
-                                 </div>
-                             </div>
-                         </div>
-                         <div className="flex gap-2">
-                            <button 
-                                onClick={() => openPreview(doc)}
-                                className="p-1.5 text-slate-300 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors"
-                                title="查看解析内容"
-                            >
-                                <Eye size={16} />
-                            </button>
-                            <button 
-                                onClick={(e) => handleDelete(e, doc.id)} 
-                                className="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                            >
-                                <Trash2 size={16} />
-                            </button>
-                         </div>
-                     </div>
-                     
-                     <p className="text-xs text-slate-500 leading-relaxed line-clamp-2 bg-slate-50 p-2 rounded mb-3 flex-1">
-                         {doc.summary}
-                     </p>
-
-                     <div className="flex items-center gap-2 border-t border-slate-50 pt-3 mt-auto">
-                        <Network size={12} className="text-violet-400" />
-                        <div className="flex gap-1 overflow-hidden">
-                            {doc.entities?.slice(0, 3).map((e, i) => (
-                                <span key={i} className="text-[10px] px-1.5 py-0.5 bg-violet-50 text-violet-600 rounded whitespace-nowrap">{e}</span>
-                            ))}
-                            {(doc.entities?.length || 0) > 3 && <span className="text-[10px] text-slate-400">...</span>}
-                        </div>
-                     </div>
-                 </div>
-                 );
-             })}
-         </div>
-
-         {documents.filter(d => d.category === activeTab).length === 0 && !isProcessing && (
-             <div className="text-center py-16 bg-white rounded-3xl border-2 border-dashed border-slate-100">
-                 <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-300">
-                     <FileUp size={32} />
-                 </div>
-                 <h3 className="font-bold text-slate-400">该分类下暂无文档</h3>
-                 <p className="text-xs text-slate-400 mt-1">所有主体共享同一套知识库，请上传通用制度文件</p>
-             </div>
-         )}
       </div>
-
-      {/* === Document Preview Modal === */}
-      {previewDoc && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
-              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl h-[85vh] flex flex-col overflow-hidden">
-                  <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-                      <div className="flex items-center gap-3">
-                          <div className="p-2 bg-indigo-100 text-indigo-600 rounded-lg"><FileText size={20} /></div>
-                          <div>
-                              <h3 className="font-bold text-slate-800 text-lg">{previewDoc.title}</h3>
-                              <div className="flex gap-2 text-xs text-slate-500">
-                                  <span>{previewDoc.chunkCount || previewChunks.length} 个切片</span>
-                                  <span>•</span>
-                                  <span>{previewDoc.content.length} 字符</span>
-                              </div>
-                          </div>
-                      </div>
-                      <button onClick={() => setPreviewDoc(null)} className="p-2 hover:bg-slate-200 rounded-full text-slate-500 transition-colors">
-                          <X size={20} />
-                      </button>
-                  </div>
-
-                  <div className="flex-1 overflow-y-auto p-6 flex gap-6">
-                      {/* Left: Raw Content */}
-                      <div className="flex-1">
-                          <h4 className="text-xs font-bold text-slate-500 uppercase mb-3 flex items-center gap-2">
-                              <FileText size={14} /> 解析后的纯文本 (Raw Text)
-                          </h4>
-                          <div className="bg-slate-50 rounded-xl p-4 text-xs font-mono text-slate-600 whitespace-pre-wrap leading-relaxed border border-slate-100 h-[calc(100%-2rem)] overflow-y-auto">
-                              {previewDoc.content}
-                          </div>
-                      </div>
-
-                      {/* Right: Chunks */}
-                      <div className="flex-1">
-                          <h4 className="text-xs font-bold text-slate-500 uppercase mb-3 flex items-center gap-2">
-                              <Layers size={14} /> 向量切片预览 (Chunks)
-                          </h4>
-                          <div className="space-y-3 h-[calc(100%-2rem)] overflow-y-auto pr-1">
-                              {previewChunks.map((chunk, idx) => (
-                                  <div key={idx} className="p-3 bg-white border border-indigo-100 rounded-xl shadow-sm hover:border-indigo-300 transition-all text-xs">
-                                      <div className="flex justify-between items-center mb-1">
-                                          <span className="font-bold text-indigo-600">Chunk #{idx + 1}</span>
-                                          <span className="text-slate-300 text-[10px]">{chunk.content.length} chars</span>
-                                      </div>
-                                      <p className="text-slate-600 leading-relaxed">{chunk.content}</p>
-                                  </div>
-                              ))}
-                              {previewChunks.length === 0 && (
-                                  <div className="text-center text-slate-400 py-10">暂无切片数据</div>
-                              )}
-                          </div>
-                      </div>
-                  </div>
-              </div>
-          </div>
-      )}
-
     </div>
   );
+};
+
+// Async component to match and highlight text using chunks
+const AsyncDocumentRenderer = ({ fullText, highlightId, docId }: { fullText: string, highlightId?: string, docId?: string }) => {
+    const [chunks, setChunks] = useState<KnowledgeChunk[]>([]);
+    const [status, setStatus] = useState<'loading'|'ready'>('loading');
+
+    useEffect(() => {
+        if (!docId) { setStatus('ready'); return; }
+        getDocumentChunks(docId).then(data => {
+            setChunks(data);
+            setStatus('ready');
+        });
+    }, [docId]);
+
+    if (status === 'loading') return <div className="flex items-center gap-2 text-slate-400"><Loader2 className="animate-spin" size={14}/> 加载原文中...</div>;
+
+    if (!highlightId) {
+        return <div className="whitespace-pre-wrap font-mono text-sm leading-7 text-slate-600">{fullText}</div>;
+    }
+
+    // Find the highlight chunk text
+    const targetChunk = chunks.find(c => c.id === highlightId);
+    if (!targetChunk) return <div className="whitespace-pre-wrap font-mono text-sm leading-7 text-slate-600">{fullText}</div>;
+
+    // Use split by the exact chunk content to insert the highlight mark
+    // Note: This relies on exact string match. If normalization differed, we fallback to just text.
+    // A robust system would store start/end offsets.
+    const parts = fullText.split(targetChunk.content);
+    
+    // If not found (due to slight cleaning diffs), we just return text. 
+    // Improvement: Normalize both before matching, or use approximate find. 
+    // For now, if exact match fails, we try to match the first 50 chars as a heuristic anchor.
+    if (parts.length === 1) {
+         // Fallback heuristic: Try to find a distinctive substring
+         const heuristic = targetChunk.content.substring(0, 50);
+         const heuristicParts = fullText.split(heuristic);
+         
+         if (heuristicParts.length > 1) {
+             return (
+                <div className="whitespace-pre-wrap font-mono text-sm leading-7 text-slate-600">
+                    {heuristicParts.map((part, i) => (
+                        <React.Fragment key={i}>
+                            {part}
+                            {i < heuristicParts.length - 1 && (
+                                <mark 
+                                    id={`chunk-${highlightId}`} 
+                                    className="bg-yellow-200 text-slate-900 px-1 rounded mx-0.5 border-b-2 border-yellow-400 font-bold animate-pulse shadow-sm"
+                                >
+                                    {heuristic}
+                                    {/* We only highlighted the first 50 chars, let's just show the rest of the chunk as normal text immediately after if possible, or just accept the anchor highlight */}
+                                    <span className="bg-yellow-50 font-normal border-none text-slate-500">...</span>
+                                </mark>
+                            )}
+                        </React.Fragment>
+                    ))}
+                </div>
+             );
+         }
+         return <div className="whitespace-pre-wrap font-mono text-sm leading-7 text-slate-600">{fullText}</div>;
+    }
+
+    return (
+        <div className="whitespace-pre-wrap font-mono text-sm leading-7 text-slate-600">
+            {parts.map((part, i) => (
+                <React.Fragment key={i}>
+                    {part}
+                    {i < parts.length - 1 && (
+                        <mark 
+                            id={`chunk-${highlightId}`} 
+                            className="bg-yellow-200 text-slate-900 px-1 rounded mx-0.5 border-b-2 border-yellow-400 font-bold animate-pulse shadow-sm"
+                        >
+                            {targetChunk.content}
+                        </mark>
+                    )}
+                </React.Fragment>
+            ))}
+        </div>
+    );
 };
 
 export default KnowledgePage;

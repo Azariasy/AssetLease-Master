@@ -1,6 +1,7 @@
+
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { LedgerRow, SystemConfig, Company, ComplianceResult } from '../types';
-import { Search, Filter, Download, X, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, FileText, ArrowRightLeft, Sparkles, Loader2, MessageSquare, Keyboard, ShieldCheck, AlertOctagon, Bot, Send, User } from 'lucide-react';
+import { Search, Filter, Download, X, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, FileText, ArrowRightLeft, Sparkles, Loader2, MessageSquare, Keyboard, ShieldCheck, AlertOctagon, Bot, Send, User, Lightbulb } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { parseNaturalLanguageQuery, generateChatResponse, checkLedgerCompliance } from '../services/geminiService';
 import { formatCurrency } from '../utils/currency';
@@ -119,6 +120,24 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
     });
   }, [data, filter.period, debouncedSubject, debouncedKeyword, filter.category, config]);
 
+  // Smart Suggestions based on visible data
+  const suggestions = useMemo(() => {
+      if (data.length === 0) return [];
+      const opts = [];
+      const currentPeriod = filter.period || periods[0];
+      if (currentPeriod) {
+          opts.push(`分析 ${currentPeriod} 的费用构成`);
+          opts.push(`查一下 ${currentPeriod} 的最大单笔支出`);
+      }
+      // Check if any specific dept is visible/dominant
+      const depts = filteredRows.map(r => r.departmentName).filter(Boolean);
+      if (depts.length > 0) {
+          const modeDept = depts.sort((a,b) => depts.filter(v => v===a).length - depts.filter(v => v===b).length).pop();
+          if(modeDept) opts.push(`${modeDept} 本年累计报销多少？`);
+      }
+      return opts.slice(0, 3);
+  }, [data, filter.period, filteredRows]);
+
   const totalDebit = useMemo(() => filteredRows.reduce((sum, r) => sum + r.debitAmount, 0), [filteredRows]);
   const totalCredit = useMemo(() => filteredRows.reduce((sum, r) => sum + r.creditAmount, 0), [filteredRows]);
 
@@ -142,10 +161,11 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
     XLSX.writeFile(workbook, `明细账_${new Date().getTime()}.xlsx`);
   };
 
-  const handleChatSubmit = async () => {
-      if (!chatInput.trim()) return;
+  const handleChatSubmit = async (overrideText?: string) => {
+      const text = overrideText || chatInput;
+      if (!text.trim()) return;
       
-      const userMsg: ChatMessage = { id: Date.now().toString(), role: 'user', content: chatInput, timestamp: Date.now() };
+      const userMsg: ChatMessage = { id: Date.now().toString(), role: 'user', content: text, timestamp: Date.now() };
       setChatHistory(prev => [...prev, userMsg]);
       setChatInput('');
       setIsChatLoading(true);
@@ -153,7 +173,7 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
       try {
           // 1. Parse Query to update Filters
           const validPeriods = Array.from(new Set(data.map(r => String(r.period)))).sort() as string[];
-          const parseRes = await parseNaturalLanguageQuery(userMsg.content, validPeriods, config);
+          const parseRes = await parseNaturalLanguageQuery(text, validPeriods, config);
           
           const newFilter = {
               period: parseRes.period || filter.period, // Keep existing if not mentioned
@@ -190,7 +210,7 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
 
           // 3. Generate Multi-turn Response
           const apiHistory = chatHistory.map(m => ({ role: m.role, content: m.content }));
-          const aiResponseText = await generateChatResponse(apiHistory, userMsg.content, stats);
+          const aiResponseText = await generateChatResponse(apiHistory, text, stats);
           
           setChatHistory(prev => [...prev, {
               id: (Date.now() + 1).toString(),
@@ -218,9 +238,26 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
       try {
           // Check visible rows (or top 20 of filter)
           const rowsToCheck = filteredRows.slice(0, 20); 
+          
+          // Now calls the ENHANCED version that uses RAG
           const results = await checkLedgerCompliance(rowsToCheck);
+          
           setComplianceResults(results);
-          if(results.length === 0) alert("未发现明显合规问题 (基于当前抽样)");
+          if(results.length === 0) {
+              setChatHistory(prev => [...prev, {
+                  id: Date.now().toString(),
+                  role: 'assistant',
+                  content: '✅ 经过基于本地知识库的检索与审计，当前视图的前20条凭证未发现明显合规风险。',
+                  timestamp: Date.now()
+              }]);
+          } else {
+              setChatHistory(prev => [...prev, {
+                  id: Date.now().toString(),
+                  role: 'assistant',
+                  content: `⚠️ 发现 ${results.length} 条潜在风险，已在下方详细列出。AI 参考了您的相关财务制度进行判定。`,
+                  timestamp: Date.now()
+              }]);
+          }
       } catch (e) {
           console.error(e);
           alert("合规检查失败");
@@ -274,7 +311,7 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
 
               {/* Chat Body */}
               {showChat && (
-                  <div className="flex flex-col h-64 transition-all duration-300">
+                  <div className="flex flex-col h-72 transition-all duration-300">
                       <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/50 scrollbar-thin">
                           {chatHistory.map(msg => (
                               <div key={msg.id} className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
@@ -290,10 +327,13 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
                               <div className="flex gap-3">
                                   <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center shrink-0"><Bot size={16} /></div>
                                   <div className="p-3 rounded-2xl bg-white border border-slate-200 shadow-sm rounded-tl-none">
-                                      <div className="flex gap-1">
-                                          <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce"></div>
-                                          <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce delay-75"></div>
-                                          <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce delay-150"></div>
+                                      <div className="flex gap-2 items-center text-slate-500 text-xs">
+                                          <span>AI 正在思考</span>
+                                          <div className="flex gap-1">
+                                              <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce"></div>
+                                              <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce delay-75"></div>
+                                              <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce delay-150"></div>
+                                          </div>
                                       </div>
                                   </div>
                               </div>
@@ -301,24 +341,39 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
                           <div ref={chatEndRef}></div>
                       </div>
 
-                      {/* Input Area */}
-                      <div className="p-3 bg-white border-t border-slate-100 flex gap-2 items-center">
-                          <input 
-                              type="text" 
-                              value={chatInput}
-                              onChange={(e) => setChatInput(e.target.value)}
-                              onKeyDown={(e) => e.key === 'Enter' && handleChatSubmit()}
-                              placeholder="输入指令，例如：筛选大于5万元的报销记录..."
-                              className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-100 transition-all"
-                              disabled={isChatLoading}
-                          />
-                          <button 
-                            onClick={handleChatSubmit} 
-                            disabled={!chatInput.trim() || isChatLoading}
-                            className="p-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 disabled:opacity-50 transition-colors"
-                          >
-                              <Send size={18} />
-                          </button>
+                      {/* Smart Suggestions & Input */}
+                      <div className="p-3 bg-white border-t border-slate-100">
+                          {/* Suggestion Chips */}
+                          <div className="flex gap-2 overflow-x-auto no-scrollbar mb-3">
+                              {suggestions.map((s, i) => (
+                                  <button 
+                                    key={i} 
+                                    onClick={() => handleChatSubmit(s)}
+                                    className="flex items-center gap-1 px-3 py-1 bg-indigo-50 border border-indigo-100 text-indigo-600 rounded-full text-xs whitespace-nowrap hover:bg-indigo-100 transition-colors"
+                                  >
+                                      <Lightbulb size={12} /> {s}
+                                  </button>
+                              ))}
+                          </div>
+
+                          <div className="flex gap-2 items-center">
+                              <input 
+                                  type="text" 
+                                  value={chatInput}
+                                  onChange={(e) => setChatInput(e.target.value)}
+                                  onKeyDown={(e) => e.key === 'Enter' && handleChatSubmit()}
+                                  placeholder="输入指令，例如：筛选大于5万元的报销记录..."
+                                  className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-100 transition-all"
+                                  disabled={isChatLoading}
+                              />
+                              <button 
+                                onClick={() => handleChatSubmit()} 
+                                disabled={!chatInput.trim() || isChatLoading}
+                                className="p-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+                              >
+                                  <Send size={18} />
+                              </button>
+                          </div>
                       </div>
                   </div>
               )}
@@ -333,11 +388,15 @@ const LedgerPage: React.FC<LedgerPageProps> = ({ data, initialFilter, config, cu
                 </div>
                 <div className="flex-1">
                     <h4 className="font-bold text-red-800 text-sm mb-1">审计发现 {complianceResults.length} 条疑似违规记录</h4>
-                    <div className="flex flex-wrap gap-2 mt-2">
+                    <p className="text-xs text-red-600 mb-2">基于知识库中的制度与规则自动判定</p>
+                    <div className="flex flex-wrap gap-2">
                         {complianceResults.map((res, i) => (
-                            <span key={i} className="inline-flex items-center gap-1 px-2 py-1 bg-white border border-red-100 rounded text-xs text-red-600" title={res.issue}>
-                                <FileText size={10} /> {res.voucherNo}: {res.summary.substring(0, 10)}...
-                            </span>
+                            <div key={i} className="flex flex-col gap-1 p-2 bg-white border border-red-100 rounded text-xs text-red-600 max-w-xs">
+                                <span className="font-bold flex items-center gap-1"><FileText size={10} /> {res.voucherNo}</span>
+                                <span>{res.summary}</span>
+                                <span className="text-red-400 italic bg-red-50 px-1 rounded">{res.issue}</span>
+                                {res.policySource && <span className="text-[9px] text-slate-400">参考: {res.policySource}</span>}
+                            </div>
                         ))}
                     </div>
                 </div>

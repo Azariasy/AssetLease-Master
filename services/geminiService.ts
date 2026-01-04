@@ -1,3 +1,4 @@
+
 import { AnalysisResult, SystemConfig, KnowledgeChunk, LedgerRow, ComplianceResult, AIQueryCache } from '../types';
 import { db } from '../db';
 import { GoogleGenAI, Type } from "@google/genai";
@@ -339,26 +340,32 @@ const vectorWorkerScript = `
         
         // 2. Pre-calculate Query Norm (Loop Invariant)
         let normA = 0.0;
-        for(let k=0; k<dim; k++) normA += queryVec[k] * queryVec[k];
-        normA = Math.sqrt(normA);
+        if (queryVec) {
+            for(let k=0; k<dim; k++) normA += queryVec[k] * queryVec[k];
+            normA = Math.sqrt(normA);
+        }
 
         // 3. Main Search Loop (Tight Loop for Performance)
         for (let i = 0; i < count; i++) {
             // A. Vector Score (Cosine Similarity)
-            let dot = 0.0;
-            let normB = 0.0;
+            let vecScore = 0.0;
             
-            const offset = i * dim;
-            
-            // Unrolled loop or just standard loop. V8 optimizes this well for TypedArrays.
-            for (let j = 0; j < dim; j++) {
-                const v = flatEmbeddings[offset + j];
-                dot += v * queryVec[j];
-                normB += v * v;
+            // Only calculate vector score if we have a valid query vector
+            if (queryVec && normA > 0) {
+                let dot = 0.0;
+                let normB = 0.0;
+                const offset = i * dim;
+                
+                for (let j = 0; j < dim; j++) {
+                    const v = flatEmbeddings[offset + j];
+                    dot += v * queryVec[j];
+                    normB += v * v;
+                }
+                
+                if (normB > 0) {
+                    vecScore = dot / (normA * Math.sqrt(normB));
+                }
             }
-            
-            // Avoid division by zero
-            const vecScore = (normA && normB) ? (dot / (normA * Math.sqrt(normB))) : 0;
 
             // B. Keyword Score (Lexical)
             let kwScore = 0;
@@ -372,10 +379,16 @@ const vectorWorkerScript = `
             }
 
             // C. Hybrid Re-ranking Formula
-            // 70% Semantic, 30% Exact Match
-            const finalScore = (vecScore * 0.7) + (kwScore * 0.3);
+            // If no vector (fallback mode), rely 100% on keywords
+            let finalScore = 0;
+            if (queryVec) {
+                finalScore = (vecScore * 0.7) + (kwScore * 0.3);
+            } else {
+                finalScore = kwScore;
+            }
 
-            if (finalScore > 0.35) {
+            // Lower threshold slightly for pure keyword matches to ensure recall
+            if (finalScore > 0.2) {
                 results.push({ index: i, score: finalScore });
             }
         }
@@ -486,18 +499,22 @@ export const searchKnowledgeBase = async (query: string, topK: number = 6): Prom
     try {
         const worker = await IndexManager.getWorker();
 
-        // 1. Embed Query
-        const ai = getAiClient();
-        const queryEmbRes = await ai.models.embedContent({
-            model: MODEL_EMBEDDING,
-            contents: { parts: [{ text: query }] },
-            config: { taskType: "RETRIEVAL_QUERY" }
-        });
-        const queryVec = queryEmbRes.embeddings?.[0]?.values || (queryEmbRes as any).embedding?.values;
+        // 1. Embed Query (with Fallback)
+        let queryVec: number[] | null = null;
+        try {
+            const ai = getAiClient();
+            const queryEmbRes = await ai.models.embedContent({
+                model: MODEL_EMBEDDING,
+                contents: { parts: [{ text: query }] },
+                config: { taskType: "RETRIEVAL_QUERY" }
+            });
+            queryVec = queryEmbRes.embeddings?.[0]?.values || (queryEmbRes as any).embedding?.values;
+        } catch (e) {
+            console.warn("Embedding API failed, falling back to local keyword search.", e);
+            // Fallback: queryVec remains null
+        }
 
-        if (!queryVec) return [];
-
-        // 2. Perform Hybrid Search in Worker
+        // 2. Perform Hybrid Search in Worker (Handles null vec)
         const searchResults: { id: string, score: number }[] = await new Promise((resolve) => {
             const handler = (e: MessageEvent) => {
                 if (e.data.type === 'search_result') {
@@ -571,32 +588,55 @@ export async function* queryKnowledgeBaseStream(query: string) {
         console.warn("Cache read failed", e);
     }
 
-    // 2. Perform Search (Reduced to 4 to minimize hallucination)
-    const searchResults = await searchKnowledgeBase(query, 4); 
+    // 2. Perform Search (Get top 8 then deduplicate)
+    const rawResults = await searchKnowledgeBase(query, 8); 
     
-    if (searchResults.length === 0) {
+    // Deduplication Logic based on Content Fingerprint
+    // This prevents [1] and [2] being virtually identical chunks
+    const uniqueResults: typeof rawResults = [];
+    const seenContent = new Set<string>();
+
+    for (const res of rawResults) {
+        // Robust fingerprint: Length + start + end + middle char
+        // Prevents header-only matches
+        const txt = res.chunk.content.trim();
+        const fingerprint = txt.length + "_" + txt.substring(0, 20) + "_" + txt.substring(Math.max(0, txt.length - 20));
+        
+        if (!seenContent.has(fingerprint)) {
+            seenContent.add(fingerprint);
+            uniqueResults.push(res);
+        }
+    }
+    
+    // Take top 4 unique
+    const finalResults = uniqueResults.slice(0, 4);
+
+    if (finalResults.length === 0) {
         yield { type: 'text', content: "未在知识库中找到相关信息。" };
         return;
     }
 
-    const sources = searchResults.map(r => ({ ...r.chunk, score: r.score }));
+    const sources = finalResults.map(r => ({ ...r.chunk, score: r.score }));
     yield { type: 'sources', sources: sources };
 
     // Explicitly Label Context for AI
-    const context = searchResults.map((r, index) => 
+    const context = finalResults.map((r, index) => 
         `[[CITATION_ID:${index + 1}]]\nSOURCE: ${r.chunk.sourceTitle}\nCONTENT: ${r.chunk.content}`
     ).join("\n\n");
 
-    // UPDATED SYSTEM INSTRUCTION FOR STRICT CITATIONS
+    // UPDATED SYSTEM INSTRUCTION FOR STRICT CITATIONS AND NO REPEATS
     const systemInstruction = `
         You are a highly precise Financial Compliance Assistant.
         
-        CRITICAL RULES:
+        CRITICAL CITATION RULES:
         1. Answer ONLY based on the provided Context.
         2. ALWAYS Answer in **Simplified Chinese (简体中文)**.
         3. CITATIONS: When using information from a block labeled [[CITATION_ID:x]], you MUST append [x] to the end of the sentence.
-        4. ACCURACY: Do not invent citation numbers. If you use information from Context 1, label it [1]. If from Context 2, label it [2].
-        5. FORMAT: Use standard brackets [1]. Do not use markdown links like [1](...).
+        4. ACCURACY: Do not invent citation numbers. If you use information from Context 1, label it [1].
+        5. NO REPEATS: Do not output consecutive identical citations like [1][1]. Use [1] only once for a statement.
+        6. DENSITY: Do not cite the same source [x] after every single sentence if the whole paragraph comes from [x]. Just cite it once at the end of the paragraph.
+        7. BIAS: Prioritize using information from Citation [1] or [2] if it contains the answer, as they are the most relevant sources.
+        8. FORMAT: Use standard brackets [1]. Do not use markdown links like [1](...).
         
         Context Provided:
         ${context}

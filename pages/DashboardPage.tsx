@@ -9,7 +9,7 @@ import {
   AlertTriangle, CheckCircle2, X, PieChart as PieIcon,
   Activity, ArrowUpRight, ArrowDownRight, CalendarClock, Upload, Sparkles, Loader2, Lightbulb,
   FileSearch, ChevronDown, ChevronUp, RefreshCw, Users, CreditCard, ShoppingBag, Briefcase,
-  Construction
+  Construction, CheckSquare
 } from 'lucide-react';
 import { BalanceRow, LedgerRow, Company, SystemConfig, AnalysisResult } from '../types';
 import { db } from '../db';
@@ -28,8 +28,400 @@ interface DashboardPageProps {
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#64748b'];
 
-// Asset related codes from Accounting Manual (Class 1)
-const ASSET_CODES = ['1601', '1604', '1901']; // Fixed Assets, Construction in Progress, Engineering Materials
+// Updated CAPEX Logic:
+// 1501(Fixed Assets) & 1801(Intangibles) are usually results of transfer, not direct investment cash flow in this context.
+// We focus on CIP (1603), Materials (1601), and R&D (1931) for Investment Calculation.
+const INVESTMENT_SUBJECTS = ['1601', '1603', '1931'];
+
+// --- Helper Components Defined BEFORE Main Component ---
+
+const ArrowRightCircleIcon = ({size}:{size:number}) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/><path d="m12 16 4-4-4-4"/></svg>
+);
+
+const LegendBadge = ({ color, label }: { color: string, label: string }) => (
+  <div className="flex items-center gap-1.5">
+      <span className={`w-2 h-2 rounded-full ${color}`}></span>
+      <span className="text-xs font-bold text-slate-500">{label}</span>
+  </div>
+);
+
+const ExecutiveCard = ({ title, amount, mom, yoy, hasYoy, period, isInverse, subLabel, subValue, color, icon, privacyMode }: any) => {
+  const gradients: any = {
+    blue: "from-blue-500 to-indigo-600",
+    orange: "from-orange-400 to-pink-500",
+    emerald: "from-emerald-400 to-teal-600",
+    purple: "from-purple-400 to-violet-600",
+    teal: "from-teal-400 to-emerald-600",
+  };
+
+  const renderTrend = (value: number, label: string) => {
+      return (
+           <div className="flex items-center gap-1 bg-white/10 px-2 py-1 rounded-lg backdrop-blur-sm border border-white/10">
+              {value > 0 ? <ArrowUpRight size={12} className="text-white"/> : value < 0 ? <ArrowDownRight size={12} className="text-white"/> : <Activity size={12} className="text-white"/>}
+              <span className="font-bold text-white text-[10px]">
+                 {label} {value > 0 ? '+' : ''}{value.toFixed(1)}%
+              </span>
+           </div>
+      );
+  };
+
+  return (
+    <div className={`rounded-2xl p-5 text-white shadow-lg shadow-slate-200/50 bg-gradient-to-br ${gradients[color]} relative overflow-hidden group`}>
+       <div className="absolute -right-4 -bottom-4 w-24 h-24 bg-white/10 rounded-full group-hover:scale-150 transition-transform duration-500"></div>
+       
+       <div className="relative z-10 flex justify-between items-start">
+          <div>
+            <p className="text-xs font-bold text-white/80 uppercase tracking-wide">{title}</p>
+            <h3 className="text-3xl font-black mt-2">
+                {privacyMode ? (
+                    <span>****</span>
+                ) : (
+                    <>
+                        <span className="text-sm align-top opacity-80 mr-1">¥</span>
+                        {(amount / 10000).toFixed(2)}
+                        <span className="text-sm align-baseline opacity-80 ml-1">w</span>
+                    </>
+                )}
+            </h3>
+          </div>
+          <div className="p-2 bg-white/20 rounded-lg backdrop-blur-sm">
+             {icon}
+          </div>
+       </div>
+
+       <div className="relative z-10 mt-4 flex items-end justify-between">
+          {mom !== undefined ? (
+             <div className="flex flex-col gap-1.5 w-full">
+                <div className="flex gap-2">
+                    {renderTrend(mom, "环比")}
+                    {hasYoy ? renderTrend(yoy, "同比") : (
+                        <div className="flex items-center gap-1 bg-white/5 px-2 py-1 rounded-lg border border-white/5 text-white/50" title="未检测到去年同期数据">
+                            <span className="text-[10px]">同比 N/A</span>
+                        </div>
+                    )}
+                </div>
+                {period && (
+                    <div className="flex items-center gap-1 text-[10px] text-white/60 font-mono mt-1">
+                        <CalendarClock size={10} />
+                        <span>统计截至: {period}</span>
+                    </div>
+                )}
+             </div>
+          ) : (
+            <div className="flex flex-col gap-1.5 w-full">
+                {/* Spacer to align with cards that have trends */}
+                <div className="h-[22px]"></div>
+                {period && (
+                    <div className="flex items-center gap-1 text-[10px] text-white/60 font-mono mt-1">
+                        <CalendarClock size={10} />
+                        <span>统计范围: {period}</span>
+                    </div>
+                )}
+            </div>
+          )}
+       </div>
+    </div>
+  );
+};
+
+const VoucherMatchingDetail = ({ period, currentEntityId, otherEntityId, otherEntityName, otherMatchedName, config, currentEntity, privacyMode }: any) => {
+  const [loading, setLoading] = useState(false);
+  const [myVouchers, setMyVouchers] = useState<LedgerRow[]>([]);
+  const [theirVouchers, setTheirVouchers] = useState<LedgerRow[]>([]);
+  
+  const [matching, setMatching] = useState(false);
+  const [matchResult, setMatchResult] = useState<any>(null);
+
+  useEffect(() => {
+    const fetchVouchers = async () => {
+      setLoading(true);
+      
+      const myRows = await db.ledger.where({ entityId: currentEntityId, period }).toArray();
+      const theirRows = await db.ledger.where({ entityId: otherEntityId, period }).toArray();
+
+      // Dynamic Filtering based on Entity Type
+      let filteredMy: LedgerRow[] = [], filteredTheir: LedgerRow[] = [];
+
+      if (currentEntity.type === 'listed') {
+          // I am Buyer (Cost Side)
+          filteredMy = myRows.filter(r => 
+            config.costSubjectCodes.some((code: string) => r.subjectCode.startsWith(code)) &&
+            (r.counterparty?.includes(otherEntityName) || 
+             (otherMatchedName && r.counterparty?.includes(otherMatchedName)) ||
+             (config.entities.find((e: Company) => e.name === otherEntityName)?.segmentPrefix && r.counterparty?.includes(config.entities.find((e: Company) => e.name === otherEntityName)?.segmentPrefix!))
+            )
+          );
+          // They are Seller (Revenue Side)
+          filteredTheir = theirRows.filter(r => 
+            config.incomeSubjectCodes.some((code: string) => r.subjectCode.startsWith(code)) &&
+            (r.counterparty?.includes(currentEntity.name) || 
+             (currentEntity.matchedNameInOtherBooks && r.counterparty?.includes(currentEntity.matchedNameInOtherBooks)) ||
+             (currentEntity.segmentPrefix && r.counterparty?.includes(currentEntity.segmentPrefix))
+            )
+          );
+      } else {
+          // I am Seller (Revenue Side)
+          filteredMy = myRows.filter(r => 
+            config.incomeSubjectCodes.some((code: string) => r.subjectCode.startsWith(code)) &&
+            (r.counterparty?.includes(otherEntityName) || 
+             (otherMatchedName && r.counterparty?.includes(otherMatchedName)) ||
+             (config.entities.find((e: Company) => e.name === otherEntityName)?.segmentPrefix && r.counterparty?.includes(config.entities.find((e: Company) => e.name === otherEntityName)?.segmentPrefix!))
+            )
+          );
+          // They are Buyer (Cost Side)
+          filteredTheir = theirRows.filter(r => 
+            config.costSubjectCodes.some((code: string) => r.subjectCode.startsWith(code)) &&
+            (r.counterparty?.includes(currentEntity.name) || 
+             (currentEntity.matchedNameInOtherBooks && r.counterparty?.includes(currentEntity.matchedNameInOtherBooks)) ||
+             (currentEntity.segmentPrefix && r.counterparty?.includes(currentEntity.segmentPrefix))
+            )
+          );
+      }
+
+      setMyVouchers(filteredMy);
+      setTheirVouchers(filteredTheir);
+      setLoading(false);
+    };
+    fetchVouchers();
+  }, [period, currentEntityId, otherEntityId, config, currentEntity]);
+
+  const handleSmartMatch = async () => {
+    setMatching(true);
+    try {
+      // Map to simpler format for AI
+      const listA = myVouchers.map(v => ({ voucherNo: v.voucherNo, amount: Math.abs(v.debitAmount || v.creditAmount), summary: v.summary, date: v.date }));
+      const listB = theirVouchers.map(v => ({ voucherNo: v.voucherNo, amount: Math.abs(v.debitAmount || v.creditAmount), summary: v.summary, date: v.date }));
+      
+      const res = await smartVoucherMatch(listA, listB);
+      setMatchResult(res);
+    } catch (e) {
+      console.error(e);
+      alert("AI 匹配失败");
+    } finally {
+      setMatching(false);
+    }
+  };
+
+  if (loading) return <div className="p-10 text-center text-slate-400 text-sm"><Loader2 size={20} className="animate-spin mx-auto mb-2"/> 加载凭证中...</div>;
+
+  return (
+    <div className="p-4 bg-slate-100/50 border-t border-b border-indigo-100 shadow-inner">
+       <div className="flex justify-between items-center mb-4">
+          <div className="text-xs font-bold text-slate-500 uppercase flex items-center gap-2">
+             <FileSearch size={14} /> 凭证级穿透 ({period})
+          </div>
+          <button 
+             onClick={handleSmartMatch} 
+             disabled={matching || myVouchers.length === 0}
+             className="px-3 py-1.5 bg-indigo-600 text-white text-xs font-bold rounded-lg shadow hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
+          >
+             {matching ? <Loader2 size={12} className="animate-spin"/> : <Sparkles size={12}/>}
+             智能凭证匹配
+          </button>
+       </div>
+
+       {matchResult && (
+         <div className="mb-4 bg-white rounded-xl p-4 border border-indigo-200 shadow-sm animate-in zoom-in-95">
+            <h4 className="font-bold text-sm text-indigo-900 mb-2">AI 匹配结果</h4>
+            <div className="text-xs text-slate-600 space-y-2">
+              <p><span className="font-bold">分析结论：</span> {matchResult.analysis}</p>
+              {matchResult.unmatchedMySide?.length > 0 && (
+                <p className="text-red-600 bg-red-50 p-2 rounded"><span className="font-bold">我方未匹配凭证：</span> {matchResult.unmatchedMySide.join(', ')}</p>
+              )}
+              {matchResult.unmatchedTheirSide?.length > 0 && (
+                <p className="text-orange-600 bg-orange-50 p-2 rounded"><span className="font-bold">对方未匹配凭证：</span> {matchResult.unmatchedTheirSide.join(', ')}</p>
+              )}
+            </div>
+         </div>
+       )}
+
+       <div className="grid grid-cols-2 gap-4">
+          {/* My Side */}
+          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+             <div className="bg-slate-50 px-3 py-2 border-b border-slate-200 text-xs font-bold text-slate-600 flex justify-between">
+                <span>我方 - {myVouchers.length} 笔</span>
+                <span>{formatCurrency(myVouchers.reduce((sum,v)=>sum+(v.debitAmount||v.creditAmount),0), privacyMode)}</span>
+             </div>
+             <div className="max-h-[300px] overflow-y-auto">
+               <table className="w-full text-xs">
+                 <tbody className="divide-y divide-slate-100">
+                    {myVouchers.map(v => {
+                       const isUnmatched = matchResult?.unmatchedMySide?.includes(v.voucherNo);
+                       return (
+                         <tr key={v.id} className={`${isUnmatched ? 'bg-red-50' : 'hover:bg-slate-50'}`}>
+                           <td className="p-2 font-mono text-blue-600">{v.voucherNo}</td>
+                           <td className="p-2 truncate max-w-[120px]" title={v.summary}>{v.summary}</td>
+                           <td className="p-2 text-right font-mono font-bold">{formatCurrency((v.debitAmount||v.creditAmount), privacyMode)}</td>
+                         </tr>
+                       );
+                    })}
+                    {myVouchers.length===0 && <tr><td colSpan={3} className="p-4 text-center text-slate-400 italic">无记录</td></tr>}
+                 </tbody>
+               </table>
+             </div>
+          </div>
+
+          {/* Their Side */}
+          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+             <div className="bg-slate-50 px-3 py-2 border-b border-slate-200 text-xs font-bold text-slate-600 flex justify-between">
+                <span>对方 - {theirVouchers.length} 笔</span>
+                <span>{formatCurrency(theirVouchers.reduce((sum,v)=>sum+(v.debitAmount||v.creditAmount),0), privacyMode)}</span>
+             </div>
+             <div className="max-h-[300px] overflow-y-auto">
+               <table className="w-full text-xs">
+                 <tbody className="divide-y divide-slate-100">
+                    {theirVouchers.map(v => {
+                       const isUnmatched = matchResult?.unmatchedTheirSide?.includes(v.voucherNo);
+                       return (
+                         <tr key={v.id} className={`${isUnmatched ? 'bg-orange-50' : 'hover:bg-slate-50'}`}>
+                           <td className="p-2 font-mono text-blue-600">{v.voucherNo}</td>
+                           <td className="p-2 truncate max-w-[120px]" title={v.summary}>{v.summary}</td>
+                           <td className="p-2 text-right font-mono font-bold">{formatCurrency((v.debitAmount||v.creditAmount), privacyMode)}</td>
+                         </tr>
+                       );
+                    })}
+                    {theirVouchers.length===0 && <tr><td colSpan={3} className="p-4 text-center text-slate-400 italic">无记录</td></tr>}
+                 </tbody>
+               </table>
+             </div>
+          </div>
+       </div>
+    </div>
+  );
+};
+
+const ReconciliationModal = ({ data, currentEntity, otherEntityId, config, onClose, aiResult, onRunAI, aiAnalyzing, privacyMode }: any) => {
+  const [expandedPeriod, setExpandedPeriod] = useState<string | null>(null);
+  
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-200">
+        <div className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="p-6 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
+                <div>
+                    <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                        <ArrowRightLeft size={18} className="text-indigo-600"/>
+                        对账详情单 (月度发生额)
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-1">
+                      我方 ({currentEntity.name}) ⇌ 对方 ({data.otherEntityName})
+                    </p>
+                </div>
+                <button onClick={onClose} className="p-2 hover:bg-slate-200 rounded-full text-slate-500 transition-colors">
+                    <X size={20} />
+                </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-0 scrollbar-thin">
+                <table className="w-full text-sm text-left">
+                    <thead className="bg-white text-slate-500 font-bold text-xs uppercase sticky top-0 border-b border-slate-100 shadow-sm z-10">
+                        <tr>
+                            <th className="px-6 py-4 bg-white">会计期间</th>
+                            <th className="px-6 py-4 text-right bg-white">{data.myLabel}</th>
+                            <th className="px-6 py-4 text-right bg-white">{data.theirLabel}</th>
+                            <th className="px-6 py-4 text-right bg-white">差额</th>
+                            <th className="px-6 py-4 text-center bg-white">结论</th>
+                            <th className="px-6 py-4 text-right bg-white">穿透</th>
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                        {data.monthlyBreakdown.map((m: any) => (
+                            <React.Fragment key={m.period}>
+                              <tr 
+                                className={`transition-colors cursor-pointer ${
+                                  m.status === 'unmatched' ? 'bg-red-50/30 hover:bg-red-50/60' : 'hover:bg-slate-50'
+                                } ${expandedPeriod === m.period ? 'bg-indigo-50/30' : ''}`}
+                                onClick={() => setExpandedPeriod(expandedPeriod === m.period ? null : m.period)}
+                              >
+                                  <td className="px-6 py-4 font-mono font-bold text-slate-700">{m.period}</td>
+                                  <td className="px-6 py-4 text-right font-mono text-slate-600">{formatCurrency(m.myVal, privacyMode)}</td>
+                                  <td className="px-6 py-4 text-right font-mono text-slate-600">{formatCurrency(m.theirVal, privacyMode)}</td>
+                                  <td className={`px-6 py-4 text-right font-mono font-bold ${m.diff !== 0 ? 'text-red-500' : 'text-slate-300'}`}>
+                                      {m.diff !== 0 ? formatCurrency(m.diff, privacyMode) : '-'}
+                                  </td>
+                                  <td className="px-6 py-4 text-center">
+                                      {m.status === 'matched' ? (
+                                           <span className="inline-flex items-center gap-1 text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded text-[10px] font-bold border border-emerald-100">
+                                              <CheckCircle2 size={10} /> 平
+                                           </span>
+                                      ) : (
+                                           <span className="inline-flex items-center gap-1 text-red-600 bg-red-50 px-2 py-0.5 rounded text-[10px] font-bold border border-red-100">
+                                              <AlertTriangle size={10} /> 差
+                                           </span>
+                                      )}
+                                  </td>
+                                  <td className="px-6 py-4 text-right">
+                                    {expandedPeriod === m.period ? <ChevronUp size={16} className="ml-auto text-indigo-500" /> : <ChevronDown size={16} className="ml-auto text-slate-400" />}
+                                  </td>
+                              </tr>
+                              {expandedPeriod === m.period && (
+                                <tr>
+                                  <td colSpan={6} className="p-0 bg-slate-50">
+                                    <VoucherMatchingDetail 
+                                      period={m.period}
+                                      currentEntityId={currentEntity.id}
+                                      otherEntityId={otherEntityId}
+                                      otherEntityName={data.otherEntityName}
+                                      otherMatchedName={data.matchedName}
+                                      config={config}
+                                      currentEntity={currentEntity}
+                                      privacyMode={privacyMode}
+                                    />
+                                  </td>
+                                </tr>
+                              )}
+                            </React.Fragment>
+                        ))}
+                    </tbody>
+                </table>
+                
+                {/* Action Area (General Analysis) */}
+                <div className="p-6 bg-slate-50 border-t border-slate-100">
+                     {aiResult ? (
+                         <div className="bg-indigo-50 rounded-xl p-4 border border-indigo-100 animate-in fade-in duration-500">
+                            <div className="flex items-center gap-2 mb-3">
+                                <Sparkles size={18} className="text-indigo-600" />
+                                <h4 className="font-bold text-indigo-900 text-sm">AI 智能诊断报告 (通义千问)</h4>
+                            </div>
+                            <div className="space-y-3">
+                                <p className="text-sm text-indigo-800 font-medium leading-relaxed">{aiResult.summary}</p>
+                                
+                                {aiResult.risks.length > 0 && (
+                                    <div className="flex gap-2 items-start">
+                                        <AlertTriangle size={14} className="text-indigo-500 mt-0.5 flex-shrink-0" />
+                                        <ul className="text-xs text-indigo-700 space-y-1">
+                                            {aiResult.risks.map((risk:any, i:number) => <li key={i}>{risk}</li>)}
+                                        </ul>
+                                    </div>
+                                )}
+                            </div>
+                         </div>
+                     ) : data.status === 'unmatched' ? (
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3 text-sm text-slate-500">
+                                <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center">
+                                    <FileSearch size={16} />
+                                </div>
+                                <span>存在差异月份？点击上方行展开凭证，或使用 AI 宏观分析</span>
+                            </div>
+                            <button 
+                                onClick={onRunAI}
+                                disabled={aiAnalyzing}
+                                className="px-4 py-2 bg-white border border-indigo-200 text-indigo-600 font-bold rounded-xl hover:bg-indigo-50 transition flex items-center gap-2"
+                            >
+                                {aiAnalyzing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
+                                宏观原因分析
+                            </button>
+                        </div>
+                     ) : null}
+                </div>
+            </div>
+        </div>
+    </div>
+  );
+};
+
+// --- Main Dashboard Component ---
 
 const DashboardPage: React.FC<DashboardPageProps> = React.memo(({ currentEntity, allEntities, balances, ledger, config, onNavigate, privacyMode }) => {
   // --- Empty State Handling ---
@@ -63,42 +455,58 @@ const DashboardPage: React.FC<DashboardPageProps> = React.memo(({ currentEntity,
     return rows.filter(r => !Array.from(allCodes).some(c => c !== r.subjectCode && c.startsWith(r.subjectCode)));
   };
 
+  // Helper to get YTD amount safely
+  const getYtdDebit = (b: BalanceRow) => b.ytdDebit !== undefined ? b.ytdDebit : b.debitPeriod;
+  const getYtdCredit = (b: BalanceRow) => b.ytdCredit !== undefined ? b.ytdCredit : b.creditPeriod;
+
   // Calculate stats based on Accounting Manual logic
   const annualStats = useMemo(() => {
-    if (!latestPeriod) return { income: 0, cost: 0, profit: 0, capex: 0, lastYearIncome: 0, lastYearCost: 0 };
+    if (!latestPeriod) return { income: 0, cost: 0, profit: 0, capex: 0, transfer: 0, lastYearIncome: 0, lastYearCost: 0, yearsIncluded: [] };
 
+    // 1. Current Year Snapshot (for Income/Cost P&L)
     const currentRows = balances.filter(b => b.period === latestPeriod);
     const leafRows = filterLeafNodes(currentRows);
 
     // Income: 5xxx (Credit - Debit)
     const ytdIncome = leafRows
         .filter(b => config.incomeSubjectCodes.some(code => b.subjectCode.startsWith(code)))
-        .reduce((sum, b) => {
-            const cr = b.ytdCredit !== undefined ? b.ytdCredit : b.creditPeriod;
-            const dr = b.ytdDebit !== undefined ? b.ytdDebit : b.debitPeriod;
-            return sum + (cr - dr);
-        }, 0);
+        .reduce((sum, b) => sum + (getYtdCredit(b) - getYtdDebit(b)), 0);
 
     // Cost/Expense: 54xx, 66xx (Debit - Credit)
     const ytdCost = leafRows
         .filter(b => config.costSubjectCodes.some(code => b.subjectCode.startsWith(code)))
-        .reduce((sum, b) => {
-            const cr = b.ytdCredit !== undefined ? b.ytdCredit : b.creditPeriod;
-            const dr = b.ytdDebit !== undefined ? b.ytdDebit : b.debitPeriod;
-            return sum + (dr - cr); 
-        }, 0);
+        .reduce((sum, b) => sum + (getYtdDebit(b) - getYtdCredit(b)), 0);
 
-    // CAPEX: 1604(CIP), 1901(Material) (Debit - Credit)
-    // Reflects investment activity
-    const ytdCapex = leafRows
-        .filter(b => ASSET_CODES.some(code => b.subjectCode.startsWith(code)))
-        .reduce((sum, b) => {
-             const cr = b.ytdCredit !== undefined ? b.ytdCredit : b.creditPeriod;
-             const dr = b.ytdDebit !== undefined ? b.ytdDebit : b.debitPeriod;
-             return sum + (dr - cr);
-        }, 0);
+    // 2. CAPEX Logic (Single Year - Current Year YTD Investment)
+    // Formula: Sum(YTD Debit - YTD Credit) for 1601, 1603, 1931 BUT EXCLUDING Settlement Subjects (160304)
+    // We are explicitly separating "Money spent on construction" (CAPEX) from "Money transferred to fixed assets" (Transfer)
+    const capex = leafRows
+        .filter(b => {
+            // Must be one of the investment subject categories
+            const isInvestCategory = INVESTMENT_SUBJECTS.some(code => b.subjectCode.startsWith(code));
+            
+            // Must NOT be a settlement/transfer-out subject
+            // 160304 is standard settlement. 
+            // Also checking for 1931 settlement just in case (though usually R&D capitalizes differently)
+            const isSettlement = b.subjectCode.startsWith('160304') || (b.subjectCode.startsWith('1931') && b.subjectName.includes('结算'));
+            
+            return isInvestCategory && !isSettlement;
+        })
+        .reduce((sum, b) => sum + (getYtdDebit(b) - getYtdCredit(b)), 0);
 
-    // Last Year Income
+    // 3. Transfer Logic (Single Year - Current Year YTD Transfer Out)
+    // Formula: Sum(YTD Credit - YTD Debit) for settlement accounts (160304).
+    // This represents the value moving from Construction to Fixed Assets.
+    const transfer = leafRows
+        .filter(b => {
+            const isCIPSettlement = b.subjectCode.startsWith('160304');
+            // If R&D has specific settlement code, include here. 
+            // For now, assuming 160304 covers the main asset transfer.
+            return isCIPSettlement;
+        })
+        .reduce((sum, b) => sum + (getYtdCredit(b) - getYtdDebit(b)), 0);
+
+    // Last Year Income (Comparison for snapshot)
     const lyIncome = leafRows
         .filter(b => config.incomeSubjectCodes.some(code => b.subjectCode.startsWith(code)))
         .reduce((sum, b) => sum + ((b.lastYearCredit || 0) - (b.lastYearDebit || 0)), 0);
@@ -111,11 +519,13 @@ const DashboardPage: React.FC<DashboardPageProps> = React.memo(({ currentEntity,
         income: ytdIncome,
         cost: ytdCost,
         profit: ytdIncome - ytdCost,
-        capex: ytdCapex,
+        capex: capex, // Net Investment Increase (Non-settlement)
+        transfer: transfer, // Settlement Outflow
         lastYearIncome: lyIncome,
-        lastYearCost: lyCost
+        lastYearCost: lyCost,
+        yearsIncluded: [latestPeriod.split('-')[0]] // Just current year
     };
-  }, [balances, latestPeriod, config]);
+  }, [balances, latestPeriod, config, periods]);
 
   const profitMargin = annualStats.income > 0 ? (annualStats.profit / annualStats.income) * 100 : 0;
   const incomeYoY = annualStats.lastYearIncome ? ((annualStats.income - annualStats.lastYearIncome) / Math.abs(annualStats.lastYearIncome)) * 100 : 0;
@@ -134,9 +544,9 @@ const DashboardPage: React.FC<DashboardPageProps> = React.memo(({ currentEntity,
       .filter(b => config.costSubjectCodes.some(code => b.subjectCode.startsWith(code)))
       .reduce((sum, b) => sum + (b.debitPeriod - b.creditPeriod), 0); 
     
-    // Capex (Monthly net debit)
+    // Capex Trend (Net Dr - Cr) - Simplified for trend (might include settlement noise in monthly view, but ok for trend direction)
     const cap = leafRows
-      .filter(b => ASSET_CODES.some(code => b.subjectCode.startsWith(code)))
+      .filter(b => INVESTMENT_SUBJECTS.some(code => b.subjectCode.startsWith(code)))
       .reduce((sum, b) => sum + (b.debitPeriod - b.creditPeriod), 0);
       
     return { period: p, income: inc, cost: cst, capex: cap, profit: inc - cst };
@@ -174,7 +584,7 @@ const DashboardPage: React.FC<DashboardPageProps> = React.memo(({ currentEntity,
     leafRows.forEach(b => {
         const isIncome = config.incomeSubjectCodes.some(code => b.subjectCode.startsWith(code));
         const isCost = config.costSubjectCodes.some(code => b.subjectCode.startsWith(code));
-        const isAsset = ASSET_CODES.some(code => b.subjectCode.startsWith(code)); // Asset suppliers also matter
+        const isAsset = INVESTMENT_SUBJECTS.some(code => b.subjectCode.startsWith(code)); // Asset suppliers also matter
         
         let cpName = b.counterpartyName || b.counterparty;
         if (!cpName || cpName === '缺省' || cpName === 'Default' || cpName === '0' || cpName.includes('挂账')) return;
@@ -342,8 +752,8 @@ const DashboardPage: React.FC<DashboardPageProps> = React.memo(({ currentEntity,
   return (
     <div className="space-y-6 relative pb-10">
       
-      {/* 1. Executive Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+      {/* 1. Executive Summary Cards (Layout Updated to 5 Cols) */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-5">
         <ExecutiveCard 
           title="累计经营收入" 
           amount={annualStats.income} 
@@ -370,10 +780,19 @@ const DashboardPage: React.FC<DashboardPageProps> = React.memo(({ currentEntity,
         <ExecutiveCard 
           title="资本性支出 (CAPEX)" 
           amount={annualStats.capex} 
-          subLabel="资产转固/在建工程"
-          subValue={formatCurrencyShort(annualStats.capex, privacyMode)}
+          // period display updated to show SINGLE YEAR context
+          period={annualStats.yearsIncluded.join(', ')}
           color="purple"
           icon={<Construction size={24} className="text-white opacity-80" />}
+          privacyMode={privacyMode}
+        />
+        <ExecutiveCard 
+          title="资产转固金额" 
+          amount={annualStats.transfer} 
+          // period display updated to show SINGLE YEAR context
+          period={annualStats.yearsIncluded.join(', ')}
+          color="teal"
+          icon={<CheckSquare size={24} className="text-white opacity-80" />}
           privacyMode={privacyMode}
         />
         {/* Reconciliation Card */}
@@ -701,389 +1120,5 @@ const DashboardPage: React.FC<DashboardPageProps> = React.memo(({ currentEntity,
     </div>
   );
 });
-
-// ... Sub Components (ReconciliationModal, VoucherMatchingDetail, ExecutiveCard, etc.) same as before ...
-
-const ArrowRightCircleIcon = ({size}:{size:number}) => (
-    <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/><path d="m12 16 4-4-4-4"/></svg>
-);
-
-const LegendBadge = ({ color, label }: any) => (
-    <div className="flex items-center gap-1.5">
-        <span className={`w-2 h-2 rounded-full ${color}`}></span>
-        <span className="text-xs font-bold text-slate-500">{label}</span>
-    </div>
-);
-
-// Include ExecutiveCard, ReconciliationModal, VoucherMatchingDetail definitions from previous version...
-// (Assuming these are kept as they were, just re-exporting them in the full file context)
-
-const ExecutiveCard = ({ title, amount, mom, yoy, hasYoy, period, isInverse, subLabel, subValue, color, icon, privacyMode }: any) => {
-  const gradients: any = {
-    blue: "from-blue-500 to-indigo-600",
-    orange: "from-orange-400 to-pink-500",
-    emerald: "from-emerald-400 to-teal-600",
-    purple: "from-purple-400 to-violet-600",
-  };
-
-  const renderTrend = (value: number, label: string) => {
-      return (
-           <div className="flex items-center gap-1 bg-white/10 px-2 py-1 rounded-lg backdrop-blur-sm border border-white/10">
-              {value > 0 ? <ArrowUpRight size={12} className="text-white"/> : value < 0 ? <ArrowDownRight size={12} className="text-white"/> : <Activity size={12} className="text-white"/>}
-              <span className="font-bold text-white text-[10px]">
-                 {label} {value > 0 ? '+' : ''}{value.toFixed(1)}%
-              </span>
-           </div>
-      );
-  };
-
-  return (
-    <div className={`rounded-2xl p-5 text-white shadow-lg shadow-slate-200/50 bg-gradient-to-br ${gradients[color]} relative overflow-hidden group`}>
-       <div className="absolute -right-4 -bottom-4 w-24 h-24 bg-white/10 rounded-full group-hover:scale-150 transition-transform duration-500"></div>
-       
-       <div className="relative z-10 flex justify-between items-start">
-          <div>
-            <p className="text-xs font-bold text-white/80 uppercase tracking-wide">{title}</p>
-            <h3 className="text-3xl font-black mt-2">
-                {privacyMode ? (
-                    <span>****</span>
-                ) : (
-                    <>
-                        <span className="text-sm align-top opacity-80 mr-1">¥</span>
-                        {(amount / 10000).toFixed(2)}
-                        <span className="text-sm align-baseline opacity-80 ml-1">w</span>
-                    </>
-                )}
-            </h3>
-          </div>
-          <div className="p-2 bg-white/20 rounded-lg backdrop-blur-sm">
-             {icon}
-          </div>
-       </div>
-
-       <div className="relative z-10 mt-4 flex items-end justify-between">
-          {mom !== undefined ? (
-             <div className="flex flex-col gap-1.5 w-full">
-                <div className="flex gap-2">
-                    {renderTrend(mom, "环比")}
-                    {hasYoy ? renderTrend(yoy, "同比") : (
-                        <div className="flex items-center gap-1 bg-white/5 px-2 py-1 rounded-lg border border-white/5 text-white/50" title="未检测到去年同期数据">
-                            <span className="text-[10px]">同比 N/A</span>
-                        </div>
-                    )}
-                </div>
-                {period && (
-                    <div className="flex items-center gap-1 text-[10px] text-white/60 font-mono mt-1">
-                        <CalendarClock size={10} />
-                        <span>统计截至: {period}</span>
-                    </div>
-                )}
-             </div>
-          ) : (
-            <div className="flex flex-col">
-                <span className="text-[10px] text-white/60">{subLabel}</span>
-                <span className="font-bold text-sm">{subValue}</span>
-            </div>
-          )}
-       </div>
-    </div>
-  );
-};
-
-const ReconciliationModal = ({ data, currentEntity, otherEntityId, config, onClose, aiResult, onRunAI, aiAnalyzing, privacyMode }: any) => {
-  const [expandedPeriod, setExpandedPeriod] = useState<string | null>(null);
-  
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-200">
-        <div className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col overflow-hidden">
-            <div className="p-6 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
-                <div>
-                    <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                        <ArrowRightLeft size={18} className="text-indigo-600"/>
-                        对账详情单 (月度发生额)
-                    </h3>
-                    <p className="text-xs text-slate-500 mt-1">
-                      我方 ({currentEntity.name}) ⇌ 对方 ({data.otherEntityName})
-                    </p>
-                </div>
-                <button onClick={onClose} className="p-2 hover:bg-slate-200 rounded-full text-slate-500 transition-colors">
-                    <X size={20} />
-                </button>
-            </div>
-            
-            <div className="flex-1 overflow-y-auto p-0 scrollbar-thin">
-                <table className="w-full text-sm text-left">
-                    <thead className="bg-white text-slate-500 font-bold text-xs uppercase sticky top-0 border-b border-slate-100 shadow-sm z-10">
-                        <tr>
-                            <th className="px-6 py-4 bg-white">会计期间</th>
-                            <th className="px-6 py-4 text-right bg-white">{data.myLabel}</th>
-                            <th className="px-6 py-4 text-right bg-white">{data.theirLabel}</th>
-                            <th className="px-6 py-4 text-right bg-white">差额</th>
-                            <th className="px-6 py-4 text-center bg-white">结论</th>
-                            <th className="px-6 py-4 text-right bg-white">穿透</th>
-                        </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-50">
-                        {data.monthlyBreakdown.map((m: any) => (
-                            <React.Fragment key={m.period}>
-                              <tr 
-                                className={`transition-colors cursor-pointer ${
-                                  m.status === 'unmatched' ? 'bg-red-50/30 hover:bg-red-50/60' : 'hover:bg-slate-50'
-                                } ${expandedPeriod === m.period ? 'bg-indigo-50/30' : ''}`}
-                                onClick={() => setExpandedPeriod(expandedPeriod === m.period ? null : m.period)}
-                              >
-                                  <td className="px-6 py-4 font-mono font-bold text-slate-700">{m.period}</td>
-                                  <td className="px-6 py-4 text-right font-mono text-slate-600">{formatCurrency(m.myVal, privacyMode)}</td>
-                                  <td className="px-6 py-4 text-right font-mono text-slate-600">{formatCurrency(m.theirVal, privacyMode)}</td>
-                                  <td className={`px-6 py-4 text-right font-mono font-bold ${m.diff !== 0 ? 'text-red-500' : 'text-slate-300'}`}>
-                                      {m.diff !== 0 ? formatCurrency(m.diff, privacyMode) : '-'}
-                                  </td>
-                                  <td className="px-6 py-4 text-center">
-                                      {m.status === 'matched' ? (
-                                           <span className="inline-flex items-center gap-1 text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded text-[10px] font-bold border border-emerald-100">
-                                              <CheckCircle2 size={10} /> 平
-                                           </span>
-                                      ) : (
-                                           <span className="inline-flex items-center gap-1 text-red-600 bg-red-50 px-2 py-0.5 rounded text-[10px] font-bold border border-red-100">
-                                              <AlertTriangle size={10} /> 差
-                                           </span>
-                                      )}
-                                  </td>
-                                  <td className="px-6 py-4 text-right">
-                                    {expandedPeriod === m.period ? <ChevronUp size={16} className="ml-auto text-indigo-500" /> : <ChevronDown size={16} className="ml-auto text-slate-400" />}
-                                  </td>
-                              </tr>
-                              {expandedPeriod === m.period && (
-                                <tr>
-                                  <td colSpan={6} className="p-0 bg-slate-50">
-                                    <VoucherMatchingDetail 
-                                      period={m.period}
-                                      currentEntityId={currentEntity.id}
-                                      otherEntityId={otherEntityId}
-                                      otherEntityName={data.otherEntityName}
-                                      otherMatchedName={data.matchedName}
-                                      config={config}
-                                      currentEntity={currentEntity}
-                                      privacyMode={privacyMode}
-                                    />
-                                  </td>
-                                </tr>
-                              )}
-                            </React.Fragment>
-                        ))}
-                    </tbody>
-                </table>
-                
-                {/* Action Area (General Analysis) */}
-                <div className="p-6 bg-slate-50 border-t border-slate-100">
-                     {aiResult ? (
-                         <div className="bg-indigo-50 rounded-xl p-4 border border-indigo-100 animate-in fade-in duration-500">
-                            <div className="flex items-center gap-2 mb-3">
-                                <Sparkles size={18} className="text-indigo-600" />
-                                <h4 className="font-bold text-indigo-900 text-sm">AI 智能诊断报告 (通义千问)</h4>
-                            </div>
-                            <div className="space-y-3">
-                                <p className="text-sm text-indigo-800 font-medium leading-relaxed">{aiResult.summary}</p>
-                                
-                                {aiResult.risks.length > 0 && (
-                                    <div className="flex gap-2 items-start">
-                                        <AlertTriangle size={14} className="text-indigo-500 mt-0.5 flex-shrink-0" />
-                                        <ul className="text-xs text-indigo-700 space-y-1">
-                                            {aiResult.risks.map((risk:any, i:number) => <li key={i}>{risk}</li>)}
-                                        </ul>
-                                    </div>
-                                )}
-                            </div>
-                         </div>
-                     ) : data.status === 'unmatched' ? (
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-3 text-sm text-slate-500">
-                                <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center">
-                                    <FileSearch size={16} />
-                                </div>
-                                <span>存在差异月份？点击上方行展开凭证，或使用 AI 宏观分析</span>
-                            </div>
-                            <button 
-                                onClick={onRunAI}
-                                disabled={aiAnalyzing}
-                                className="px-4 py-2 bg-white border border-indigo-200 text-indigo-600 font-bold rounded-xl hover:bg-indigo-50 transition flex items-center gap-2"
-                            >
-                                {aiAnalyzing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
-                                宏观原因分析
-                            </button>
-                        </div>
-                     ) : null}
-                </div>
-            </div>
-        </div>
-    </div>
-  );
-});
-
-const VoucherMatchingDetail = ({ period, currentEntityId, otherEntityId, otherEntityName, otherMatchedName, config, currentEntity, privacyMode }: any) => {
-  const [loading, setLoading] = useState(false);
-  const [myVouchers, setMyVouchers] = useState<LedgerRow[]>([]);
-  const [theirVouchers, setTheirVouchers] = useState<LedgerRow[]>([]);
-  
-  const [matching, setMatching] = useState(false);
-  const [matchResult, setMatchResult] = useState<any>(null);
-
-  useEffect(() => {
-    const fetchVouchers = async () => {
-      setLoading(true);
-      
-      const myRows = await db.ledger.where({ entityId: currentEntityId, period }).toArray();
-      const theirRows = await db.ledger.where({ entityId: otherEntityId, period }).toArray();
-
-      // Dynamic Filtering based on Entity Type
-      let filteredMy, filteredTheir;
-
-      if (currentEntity.type === 'listed') {
-          // I am Buyer (Cost Side)
-          filteredMy = myRows.filter(r => 
-            config.costSubjectCodes.some((code: string) => r.subjectCode.startsWith(code)) &&
-            (r.counterparty?.includes(otherEntityName) || 
-             (otherMatchedName && r.counterparty?.includes(otherMatchedName)) ||
-             (config.entities.find((e: Company) => e.name === otherEntityName)?.segmentPrefix && r.counterparty?.includes(config.entities.find((e: Company) => e.name === otherEntityName)?.segmentPrefix!))
-            )
-          );
-          // They are Seller (Revenue Side)
-          filteredTheir = theirRows.filter(r => 
-            config.incomeSubjectCodes.some((code: string) => r.subjectCode.startsWith(code)) &&
-            (r.counterparty?.includes(currentEntity.name) || 
-             (currentEntity.matchedNameInOtherBooks && r.counterparty?.includes(currentEntity.matchedNameInOtherBooks)) ||
-             (currentEntity.segmentPrefix && r.counterparty?.includes(currentEntity.segmentPrefix))
-            )
-          );
-      } else {
-          // I am Seller (Revenue Side)
-          filteredMy = myRows.filter(r => 
-            config.incomeSubjectCodes.some((code: string) => r.subjectCode.startsWith(code)) &&
-            (r.counterparty?.includes(otherEntityName) || 
-             (otherMatchedName && r.counterparty?.includes(otherMatchedName)) ||
-             (config.entities.find((e: Company) => e.name === otherEntityName)?.segmentPrefix && r.counterparty?.includes(config.entities.find((e: Company) => e.name === otherEntityName)?.segmentPrefix!))
-            )
-          );
-          // They are Buyer (Cost Side)
-          filteredTheir = theirRows.filter(r => 
-            config.costSubjectCodes.some((code: string) => r.subjectCode.startsWith(code)) &&
-            (r.counterparty?.includes(currentEntity.name) || 
-             (currentEntity.matchedNameInOtherBooks && r.counterparty?.includes(currentEntity.matchedNameInOtherBooks)) ||
-             (currentEntity.segmentPrefix && r.counterparty?.includes(currentEntity.segmentPrefix))
-            )
-          );
-      }
-
-      setMyVouchers(filteredMy);
-      setTheirVouchers(filteredTheir);
-      setLoading(false);
-    };
-    fetchVouchers();
-  }, [period, currentEntityId, otherEntityId, config, currentEntity]);
-
-  const handleSmartMatch = async () => {
-    setMatching(true);
-    try {
-      // Map to simpler format for AI
-      const listA = myVouchers.map(v => ({ voucherNo: v.voucherNo, amount: Math.abs(v.debitAmount || v.creditAmount), summary: v.summary, date: v.date }));
-      const listB = theirVouchers.map(v => ({ voucherNo: v.voucherNo, amount: Math.abs(v.debitAmount || v.creditAmount), summary: v.summary, date: v.date }));
-      
-      const res = await smartVoucherMatch(listA, listB);
-      setMatchResult(res);
-    } catch (e) {
-      console.error(e);
-      alert("AI 匹配失败");
-    } finally {
-      setMatching(false);
-    }
-  };
-
-  if (loading) return <div className="p-10 text-center text-slate-400 text-sm"><Loader2 size={20} className="animate-spin mx-auto mb-2"/> 加载凭证中...</div>;
-
-  return (
-    <div className="p-4 bg-slate-100/50 border-t border-b border-indigo-100 shadow-inner">
-       <div className="flex justify-between items-center mb-4">
-          <div className="text-xs font-bold text-slate-500 uppercase flex items-center gap-2">
-             <FileSearch size={14} /> 凭证级穿透 ({period})
-          </div>
-          <button 
-             onClick={handleSmartMatch} 
-             disabled={matching || myVouchers.length === 0}
-             className="px-3 py-1.5 bg-indigo-600 text-white text-xs font-bold rounded-lg shadow hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
-          >
-             {matching ? <Loader2 size={12} className="animate-spin"/> : <Sparkles size={12}/>}
-             智能凭证匹配
-          </button>
-       </div>
-
-       {matchResult && (
-         <div className="mb-4 bg-white rounded-xl p-4 border border-indigo-200 shadow-sm animate-in zoom-in-95">
-            <h4 className="font-bold text-sm text-indigo-900 mb-2">AI 匹配结果</h4>
-            <div className="text-xs text-slate-600 space-y-2">
-              <p><span className="font-bold">分析结论：</span> {matchResult.analysis}</p>
-              {matchResult.unmatchedMySide?.length > 0 && (
-                <p className="text-red-600 bg-red-50 p-2 rounded"><span className="font-bold">我方未匹配凭证：</span> {matchResult.unmatchedMySide.join(', ')}</p>
-              )}
-              {matchResult.unmatchedTheirSide?.length > 0 && (
-                <p className="text-orange-600 bg-orange-50 p-2 rounded"><span className="font-bold">对方未匹配凭证：</span> {matchResult.unmatchedTheirSide.join(', ')}</p>
-              )}
-            </div>
-         </div>
-       )}
-
-       <div className="grid grid-cols-2 gap-4">
-          {/* My Side */}
-          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-             <div className="bg-slate-50 px-3 py-2 border-b border-slate-200 text-xs font-bold text-slate-600 flex justify-between">
-                <span>我方 - {myVouchers.length} 笔</span>
-                <span>{formatCurrency(myVouchers.reduce((sum,v)=>sum+(v.debitAmount||v.creditAmount),0), privacyMode)}</span>
-             </div>
-             <div className="max-h-[300px] overflow-y-auto">
-               <table className="w-full text-xs">
-                 <tbody className="divide-y divide-slate-100">
-                    {myVouchers.map(v => {
-                       const isUnmatched = matchResult?.unmatchedMySide?.includes(v.voucherNo);
-                       return (
-                         <tr key={v.id} className={`${isUnmatched ? 'bg-red-50' : 'hover:bg-slate-50'}`}>
-                           <td className="p-2 font-mono text-blue-600">{v.voucherNo}</td>
-                           <td className="p-2 truncate max-w-[120px]" title={v.summary}>{v.summary}</td>
-                           <td className="p-2 text-right font-mono font-bold">{formatCurrency((v.debitAmount||v.creditAmount), privacyMode)}</td>
-                         </tr>
-                       );
-                    })}
-                    {myVouchers.length===0 && <tr><td colSpan={3} className="p-4 text-center text-slate-400 italic">无记录</td></tr>}
-                 </tbody>
-               </table>
-             </div>
-          </div>
-
-          {/* Their Side */}
-          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-             <div className="bg-slate-50 px-3 py-2 border-b border-slate-200 text-xs font-bold text-slate-600 flex justify-between">
-                <span>对方 - {theirVouchers.length} 笔</span>
-                <span>{formatCurrency(theirVouchers.reduce((sum,v)=>sum+(v.debitAmount||v.creditAmount),0), privacyMode)}</span>
-             </div>
-             <div className="max-h-[300px] overflow-y-auto">
-               <table className="w-full text-xs">
-                 <tbody className="divide-y divide-slate-100">
-                    {theirVouchers.map(v => {
-                       const isUnmatched = matchResult?.unmatchedTheirSide?.includes(v.voucherNo);
-                       return (
-                         <tr key={v.id} className={`${isUnmatched ? 'bg-orange-50' : 'hover:bg-slate-50'}`}>
-                           <td className="p-2 font-mono text-blue-600">{v.voucherNo}</td>
-                           <td className="p-2 truncate max-w-[120px]" title={v.summary}>{v.summary}</td>
-                           <td className="p-2 text-right font-mono font-bold">{formatCurrency((v.debitAmount||v.creditAmount), privacyMode)}</td>
-                         </tr>
-                       );
-                    })}
-                    {theirVouchers.length===0 && <tr><td colSpan={3} className="p-4 text-center text-slate-400 italic">无记录</td></tr>}
-                 </tbody>
-               </table>
-             </div>
-          </div>
-       </div>
-    </div>
-  );
-};
 
 export default DashboardPage;

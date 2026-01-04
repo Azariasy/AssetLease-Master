@@ -1,3 +1,4 @@
+
 import { LedgerRow, BalanceRow } from '../types';
 import * as XLSX from 'xlsx';
 
@@ -318,11 +319,20 @@ const processBalanceMatrix = (data: any[][], expectedPrefix?: string): BalanceRo
     let idxSubCode = headers.findIndex(h => h === '子目段编码' || h === '子目段');
     let idxSubName = headers.findIndex(h => h === '子目段说明' || h === '子目说明');
     let idxOpening = findIdx(['期初']);
+    // Period Debit/Credit (Month)
     let idxDebit = findIdx(['借方', '借项', '本期借']);
     let idxCredit = findIdx(['贷方', '贷项', '本期贷']);
     let idxClosing = findIdx(['期末']);
+    
+    // Improved YTD detection
+    // Prioritize explicit "Year" or "Cumulative" keywords
     let idxYtdDebit = headers.findIndex(h => h.includes('借') && (h.includes('累计') || h.includes('本年')));
     let idxYtdCredit = headers.findIndex(h => h.includes('贷') && (h.includes('累计') || h.includes('本年')));
+    
+    // If strict match fails, try relaxed match (but be careful not to pick period columns)
+    if (idxYtdDebit === -1) idxYtdDebit = headers.findIndex(h => h.includes('借') && h.includes('年'));
+    if (idxYtdCredit === -1) idxYtdCredit = headers.findIndex(h => h.includes('贷') && h.includes('年'));
+
     let idxLyDebit = headers.findIndex(h => h.includes('上年') && h.includes('借'));
     let idxLyCredit = headers.findIndex(h => h.includes('上年') && h.includes('贷'));
     let idxLyClosing = headers.findIndex(h => (h.includes('上年') || h.includes('去年') || h.includes('同期')) && (h.includes('期末') || h.includes('余额')) && !h.includes('借') && !h.includes('贷'));
@@ -386,8 +396,8 @@ const processBalanceMatrix = (data: any[][], expectedPrefix?: string): BalanceRo
             debitPeriod: idxDebit > -1 ? parseAmount(cells[idxDebit]) : 0,
             creditPeriod: idxCredit > -1 ? parseAmount(cells[idxCredit]) : 0,
             closingBalance: idxClosing > -1 ? parseAmount(cells[idxClosing]) : 0,
-            ytdDebit: idxYtdDebit > -1 ? parseAmount(cells[idxYtdDebit]) : 0,
-            ytdCredit: idxYtdCredit > -1 ? parseAmount(cells[idxYtdCredit]) : 0,
+            ytdDebit: idxYtdDebit > -1 ? parseAmount(cells[idxYtdDebit]) : (idxDebit > -1 ? parseAmount(cells[idxDebit]) : 0), // Fallback to period debit if no YTD
+            ytdCredit: idxYtdCredit > -1 ? parseAmount(cells[idxYtdCredit]) : (idxCredit > -1 ? parseAmount(cells[idxCredit]) : 0),
             lastYearDebit: idxLyDebit > -1 ? parseAmount(cells[idxLyDebit]) : 0,
             lastYearCredit: idxLyCredit > -1 ? parseAmount(cells[idxLyCredit]) : 0,
             lastYearClosingBalance: idxLyClosing > -1 ? parseAmount(cells[idxLyClosing]) : 0,

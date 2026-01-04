@@ -8,17 +8,26 @@ export class FinanceDB extends Dexie {
   history!: Table<ImportHistoryItem, string>;
   knowledge!: Table<KnowledgeDocument, string>;
   chunks!: Table<KnowledgeChunk, string>;
-  queryCache!: Table<AIQueryCache, string>; // New Cache Table
+  queryCache!: Table<AIQueryCache, string>;
 
   constructor() {
-    super('FinanceMasterDB_v6'); // Version bumped for queryCache
+    super('FinanceMasterDB_v6'); 
+    
+    // Version 1
     (this as any).version(1).stores({
       ledger: 'id, entityId, period, subjectCode, importId, [entityId+period], [entityId+counterparty]', 
       balances: 'id, entityId, period, subjectCode, importId, [entityId+period], [entityId+counterparty]',
       history: 'id, entityId, type',
       knowledge: 'id, category, status',
       chunks: 'id, documentId, tags',
-      queryCache: '++id, queryText, timestamp' // Basic indexing
+      queryCache: '++id, queryText, timestamp'
+    });
+
+    // Version 2: Add specific composite indexes for precise duplicate detection
+    // Note: IndexedDB upgrade preserves existing data automatically
+    (this as any).version(2).stores({
+      ledger: 'id, entityId, period, subjectCode, importId, [entityId+period], [entityId+counterparty], [entityId+period+voucherNo]', 
+      balances: 'id, entityId, period, subjectCode, importId, [entityId+period], [entityId+counterparty], [entityId+period+subjectCode]',
     });
   }
 }

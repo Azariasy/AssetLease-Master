@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Upload, FileText, CheckCircle2, Trash2, BrainCircuit, Loader2, FileUp, Sparkles, X, Users, Quote, Send, Bot, BookOpenCheck, ChevronRight, Layers, ExternalLink, Box, Lightbulb, RotateCcw, Copy, Check, Search } from 'lucide-react';
+import { Upload, FileText, CheckCircle2, Trash2, BrainCircuit, Loader2, FileUp, Sparkles, X, Users, Quote, Send, Bot, BookOpenCheck, ChevronRight, Layers, ExternalLink, Box, Lightbulb, RotateCcw, Copy, Check, Search, RotateCw } from 'lucide-react';
 import { db } from '../db';
 import { KnowledgeDocument, KnowledgeChunk } from '../types';
 import { ingestDocument, queryKnowledgeBaseStream, parseDocumentWithAI, searchKnowledgeBase, getDocumentChunks } from '../services/geminiService';
@@ -24,13 +24,18 @@ const DEFAULT_SUGGESTIONS = [
 ];
 
 const MarkdownRenderer = ({ content, onSourceClick }: { content: string, onSourceClick: (idx: number) => void }) => {
-    // 1. Pre-process content: Convert [1] -> [1](#source-1)
-    // Using hash links ensures standard markdown parsers treat them as internal links, 
-    // which we can then intercept easily.
+    // 1. Pre-process content: 
+    //    a) Deduplicate consecutive citations like [1][1] -> [1] or [1] [1] -> [1]
+    //    b) Convert [1] -> [1](#source-1)
     const processedContent = useMemo(() => {
         if (!content) return '';
-        // Match [1], [ 1 ], 【1】 patterns globally and convert to internal anchor format
-        return content.replace(/\[\s*(\d+)\s*\]/g, '[$1](#source-$1)')
+        
+        // Step A: Deduplicate consecutive same numbers
+        // Matches [1][1] or [1] [1] or [1]  [1]
+        let cleaned = content.replace(/\[\s*(\d+)\s*\](?:\s*\[\s*\1\s*\])+/g, '[$1]');
+
+        // Step B: Convert to link format
+        return cleaned.replace(/\[\s*(\d+)\s*\]/g, '[$1](#source-$1)')
                       .replace(/【\s*(\d+)\s*】/g, '[$1](#source-$1)')
                       .replace(/\（\s*(\d+)\s*\）/g, '[$1](#source-$1)'); 
     }, [content]);
@@ -281,6 +286,12 @@ const KnowledgePage: React.FC = () => {
       }
   };
 
+  const handleRebuildIndex = async () => {
+      if (confirm("重建索引将重新初始化向量计算引擎，可能会短暂卡顿。\n\n当搜索结果异常时使用此功能。继续吗？")) {
+          window.location.reload(); // Simple and effective way to rebuild worker and memory index
+      }
+  };
+
   const handleSendMessage = async (textOverride?: string) => {
       const text = textOverride || chatInput;
       if (!text.trim()) return;
@@ -357,7 +368,7 @@ const KnowledgePage: React.FC = () => {
       return (
           <button 
             onClick={handleCopy} 
-            className="p-1.5 text-slate-400 hover:text-indigo-600 bg-white/50 hover:bg-white rounded-lg transition-all"
+            className="p-1.5 text-slate-400 hover:text-indigo-600 bg-white/50 hover:bg-white rounded-lg transition-all border border-transparent hover:border-slate-100 shadow-sm"
             title="复制回答"
           >
               {copied ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
@@ -383,11 +394,15 @@ const KnowledgePage: React.FC = () => {
                   <Bot size={16} /> 智能问答
               </button>
           </div>
-          {isProcessing && (
+          {isProcessing ? (
               <div className="flex items-center gap-2 text-xs font-bold text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-full animate-pulse">
                   <Loader2 size={12} className="animate-spin" />
                   <span>{processStatus} {processPercent}%</span>
               </div>
+          ) : activeTab === 'library' && (
+              <button onClick={handleRebuildIndex} className="flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-indigo-600 bg-white hover:bg-indigo-50 px-3 py-1.5 rounded-lg border border-slate-200 transition-colors">
+                  <RotateCw size={12} /> 重建索引
+              </button>
           )}
       </div>
 
@@ -512,7 +527,7 @@ const KnowledgePage: React.FC = () => {
                                     {/* Sources displayed AFTER the bubble content wrapper for better flow, or bottom of bubble */}
                                     {msg.sources && msg.sources.length > 0 && (
                                         <div className="flex flex-wrap gap-2 pl-2 mt-1">
-                                            {/* Status Header - REMOVED CONDITIONAL TEXT to avoid "Reading" stuck state */}
+                                            {/* Status Header */}
                                             <div className="text-[10px] text-slate-400 font-bold uppercase w-full flex items-center gap-1.5 mb-1">
                                                 <BookOpenCheck size={12} className="text-emerald-500" />
                                                 已检索到 {msg.sources.length} 处相关参考资料
@@ -520,7 +535,7 @@ const KnowledgePage: React.FC = () => {
                                             
                                             {msg.sources.map((src, i) => (
                                                 <button 
-                                                    key={i}
+                                                    key={src.id || i} // CRITICAL FIX: Use ID as key to prevent re-renders
                                                     onClick={() => openSourcePreview(src)}
                                                     // Show Snippet Preview on Hover for context differentiation
                                                     title={src.content.substring(0, 300) + '...'}
@@ -548,13 +563,19 @@ const KnowledgePage: React.FC = () => {
 
                     <div className="p-4 bg-white border-t border-slate-100 shrink-0">
                         <div className="relative">
-                            <input 
-                                type="text"
+                            <textarea 
                                 value={chatInput}
                                 onChange={(e) => setChatInput(e.target.value)}
-                                onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                                placeholder="输入问题，AI 将引用原文回答..."
-                                className="w-full pl-5 pr-14 py-4 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 transition-all"
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' && !e.shiftKey) {
+                                        e.preventDefault();
+                                        handleSendMessage();
+                                    }
+                                }}
+                                placeholder="输入问题，AI 将引用原文回答... (Shift+Enter 换行)"
+                                className="w-full pl-5 pr-14 py-4 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium outline-none focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 transition-all resize-none scrollbar-thin"
+                                rows={1}
+                                style={{ minHeight: '56px', maxHeight: '150px' }}
                                 disabled={isChatLoading}
                             />
                             {messages.length > 0 && (
